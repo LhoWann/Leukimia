@@ -1,75 +1,55 @@
-# Leukemia Classification using ConvNeXt V2
+# Leukemia Classification using FocusAugMix & ConvNeXt V2
 
-Klasifikasi citra leukemia limfoblastik akut (ALL) ke dalam subtipe L1, L2, dan L3 menggunakan model ConvNeXt V2 Tiny dengan transfer learning dari pretrained ImageNet-22k.
+Klasifikasi citra leukemia limfoblastik akut (ALL) ke dalam subtipe L1, L2, dan L3 menggunakan pipeline modern yang mengimplementasikan arsitektur **FocusAugMix** (paper 2025) dipadukan dengan **ConvNeXt V2 Tiny** yang dilengkapi dengan Multi-Head Attention dan Grad-CAM hooks.
 
-## Dataset
+## Dataset & Preprocessing
 
-Dataset yang digunakan adalah **ALL-IDB (Acute Lymphoblastic Leukemia Image Database)** yang berisi citra mikroskopis sel darah. Dataset dibagi ke dalam 3 kelas berdasarkan subtipe morfologi FAB:
+Dataset yang digunakan adalah **ALL-IDB (Acute Lymphoblastic Leukemia Image Database)** yang berisi citra mikroskopis sel darah. Data L1 dan L2 awalnya berupa *full blood smear* resolusi tinggi dengan banyak sel, sedangkan L3 adalah *single cell*.
 
-| Kelas | Deskripsi |
-|-------|-----------|
-| L1 | Small cell, sitoplasma sedikit, nukleus reguler |
-| L2 | Large cell, sitoplasma lebih banyak, nukleus ireguler |
-| L3 | Large cell, sitoplasma bervakuola, nukleus reguler |
+### Segmentasi Sel Mandiri (`segment_dataset.py`)
+Mengingat perbedaan format raw image, sebuah pipeline preprocessing khusus telah dibangun:
+1. **Deduplikasi Hash**: Mendeteksi dan menghapus duplikasi *source image* menggunakan MD5 hash untuk mencegah *data leakage*.
+2. **HSV Color Segmentation**: Mengisolasi *blast cell* yang berwarna ungu pekat dari *red blood cells* (RBC) pada smear L1/L2.
+3. **Cropping & Resizing**: Sel yang terdeteksi di-crop ke *bounding box*-nya dengan padding, filter noise (minimal luas dan rasio warna), lalu di-resize seragam menjadi **257x257**.
+4. **Data Splitting**: Splitting 80:20 (Train/Val) dilakukan *berdasarkan source image*, sehingga crop cell dari gambar pasien/source yang sama tidak akan bocor ke set validasi.
 
-Data di-split 80:20 menjadi `train` dan `val` menggunakan script di folder `Check&SplitData/`.
+## FocusAugMix Data Augmentation
+
+Alih-alih menggunakan augmentasi standar, model ini menggunakan **FocusAugMix** (`DataSetup.py`), sebuah metode augmentasi spasial mutakhir untuk citra medis:
+- **SLIC Superpixels**: Memecah gambar menjadi segmen-segmen *superpixel*.
+- **Spectral Residual Saliency**: Menggunakan FFT (Fast Fourier Transform) log-spectrum untuk menghasilkan peta *saliency*, mendeteksi area gambar paling informatif (nukleus/sitoplasma sel).
+- **Saliency-Guided Mix**: Mencampur (*mix*) segmen paling salient dari gambar B ke gambar A. Jika model mengekspor Grad-CAM, peta saliency akan dipadukan dengan Grad-CAM.
+- Dataset me-return label *mixed* `(image, target_a, target_b, lambda)`.
 
 ## Arsitektur Model
 
-- **Backbone**: ConvNeXt V2 Tiny (`convnextv2_tiny.fcmae_ft_in22k_in1k`)
-- **Pretrained**: ImageNet-22k, fine-tuned on ImageNet-1k
-- **Library**: [timm (PyTorch Image Models)](https://github.com/huggingface/pytorch-image-models)
-
-## Preprocessing
-
-| Parameter | Nilai |
-|-----------|-------|
-| Input Size | 224 x 224 |
-| Normalization | Mean=[0.485, 0.456, 0.406], Std=[0.229, 0.224, 0.225] |
-| Augmentasi (train) | RandomHorizontalFlip, RandomRotation(15) |
+- **Backbone**: ConvNeXt V2 Tiny (`convnextv2_tiny.fcmae_ft_in22k_in1k`) via `timm`.
+- **Multi-Head Attention**: Menambahkan layer self-attention di atas fitur spasial terakhir sebelum pooling.
+- **Grad-CAM System**: Model telah dibungkus dengan hook maju-mundur (*forward-backward hooks*) untuk dapat me-return *class activation heatmaps* (untuk guidance FocusAugMix lanjutan).
 
 ## Konfigurasi Training
 
-| Parameter | Nilai |
-|-----------|-------|
-| Optimizer | AdamW |
-| Learning Rate | 1e-4 |
-| Loss Function | CrossEntropyLoss |
-| Batch Size | 16 |
-| Epochs | 5 |
-| Seed | 42 |
-| Device | CUDA (fallback CPU) |
-
-## Evaluasi
-
-Evaluasi dilakukan pada set validasi dengan metrik:
-- Classification Report (precision, recall, f1-score per kelas)
-- Confusion Matrix
+- **Optimizer**: AdamW (lr=1e-4, weight_decay=1e-4)
+- **Scheduler**: ReduceLROnPlateau (factor=0.5, patience=3)
+- **Loss Function**: Custom `mixup_criterion` untuk CrossEntropy (karena label bersifat kontinyu akibat FocusAugMix)
+- **Training Loops**: Gradient clipping (max_norm=1.0), best model checkpointing (`best_model.pth`), 20 Epochs.
 
 ## Struktur Proyek
 
 ```
 .
 ├── main.py                 # Entry point, orchestrasi training dan evaluasi
-├── model.py                # Definisi model ConvNeXt V2 via timm
-├── DataSetup.py            # DataLoader, transforms, dan augmentasi
-├── engine.py               # Training loop dengan progress bar (tqdm)
-├── evaluate.py             # Evaluasi model (classification report, confusion matrix)
-├── requirements.txt        # Dependensi Python
-├── Check&SplitData/
-│   ├── check.py            # Cek distribusi data per kelas
-│   └── split_data.py       # Split dataset 80:20 ke train/val
-├── ALL_IDB Dataset/        # Dataset asli (tidak di-track git)
-├── data/
+├── model.py                # Definisi ConvNeXtV2WithAttention & GradCAM hook
+├── DataSetup.py            # FocusAugMixDataset, SLIC, dan FFT Saliency
+├── engine.py               # Training loop khusus dengan mixup_criterion
+├── evaluate.py             # Evaluasi model pada set validasi
+├── segment_dataset.py      # Pipeline deteksi sel, deduplikasi, dan splitting
+├── check_crop.py           # Script utility untuk visualisasi hasil cropping
+├── requirements.txt        # Dependensi Python lengkap
+├── ALL_IDB Dataset/        # Dataset raw (full smears & single cells)
+├── data/                   # Dataset hasil proses (dibentuk oleh segment_dataset.py)
 │   ├── train/
-│   │   ├── L1/
-│   │   ├── L2/
-│   │   └── L3/
 │   └── val/
-│       ├── L1/
-│       ├── L2/
-│       └── L3/
-└── Reference/              # Referensi paper dan dokumen pendukung
 ```
 
 ## Cara Menjalankan
@@ -82,26 +62,35 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. Persiapan Data
+### 2. Segmentasi Data dan Splitting
 
-Extract `archive (1).zip` ke folder `ALL_IDB Dataset/`, lalu jalankan:
+Extract `archive (1).zip` sehingga membentuk folder `ALL_IDB Dataset/` dengan subfolder `L1`, `L2`, dan `L3`. Kemudian jalankan:
 
 ```bash
-python Check&SplitData/check.py
-python Check&SplitData/split_data.py
+python segment_dataset.py
+```
+*(Proses ini akan mengidentifikasi sel pada raw image, men-deduplikasi data, membagi train/val secara aman, dan menyimpannya ke folder `data/`)*
+
+(Opsional) Cek hasil deteksi sel:
+```bash
+python check_crop.py
 ```
 
-### 3. Training dan Evaluasi
+### 3. Training Pipeline
 
 ```bash
 python main.py
 ```
+*(Script ini akan men-train model selama 20 epoch menggunakan augmentasi FocusAugMix, menyimpan checkpoint terbaik, dan mencetak Classification Report / Confusion Matrix di akhir).*
 
 ## Requirements
 
 - Python 3.10+
 - PyTorch 2.10.0
-- torchvision 0.25.0
+- torchvision
 - timm
+- scikit-image (untuk SLIC superpixels)
+- opencv-python (untuk FFT & HSV color segmentation)
 - scikit-learn
 - tqdm
+- numpy, pillow, scipy, matplotlib
