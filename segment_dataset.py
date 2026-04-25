@@ -2,6 +2,10 @@ import hashlib
 import numpy as np
 import cv2
 
+AREA_MIN   = 2000
+AREA_MAX   = 80000
+PURPLE_MIN = 0.15
+
 def md5_hash(filepath: str) -> str:
     # Menghitung hash MD5 untuk deduplication.
     with open(filepath, "rb") as f:
@@ -38,3 +42,17 @@ def apply_morphology(mask: np.ndarray) -> np.ndarray:
 def detect_contours(mask: np.ndarray) -> list:
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return list(contours)
+
+def filter_contours(contours: list, mask: np.ndarray) -> list:
+    valid = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if not (AREA_MIN < area < AREA_MAX):
+            continue
+        x, y, w, h   = cv2.boundingRect(cnt)
+        roi_mask      = mask[y:y+h, x:x+w]
+        purple_ratio  = roi_mask.sum() / (255 * w * h + 1e-6)
+        if purple_ratio < PURPLE_MIN:
+            continue
+        valid.append(cnt)
+    return valid
