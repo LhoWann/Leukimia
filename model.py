@@ -37,3 +37,17 @@ class SpatialAttentionBlock(nn.Module):
         attn_out    = self.dropout(attn_out)
         out         = attn_out.permute(0, 2, 1).view(B, C, H, W)
         return x + out
+    
+class ClassificationHead(nn.Module):
+    def __init__(self, in_features: int, num_classes: int, dropout: float = 0.3):
+        super().__init__()
+        self.gap     = nn.AdaptiveAvgPool2d(1)
+        self.flatten = nn.Flatten()
+        self.dropout = nn.Dropout(dropout)
+        self.fc      = nn.Linear(in_features, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.gap(x)
+        x = self.flatten(x)
+        x = self.dropout(x)
+        return self.fc(x)
