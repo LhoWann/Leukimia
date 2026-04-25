@@ -28,3 +28,9 @@ def apply_hsv_threshold(hsv: np.ndarray) -> np.ndarray:
     lower = np.array([110, 80,  50])
     upper = np.array([170, 255, 255])
     return cv2.inRange(hsv, lower, upper)
+
+def apply_morphology(mask: np.ndarray) -> np.ndarray:
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel, iterations=1)
+    return mask
