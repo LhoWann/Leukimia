@@ -1,6 +1,7 @@
 
 import timm
 import torch
+import torch.nn as nn
 
 BACKBONE_NAME = "convnextv2_tiny.fcmae_ft_in22k_in1k"
 
@@ -15,3 +16,24 @@ def build_backbone(pretrained: bool = True):
         feats   = backbone(dummy)
         out_channels = feats[-1].shape[1]
     return backbone, out_channels
+
+class SpatialAttentionBlock(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        tokens      = x.flatten(2).permute(0, 2, 1)
+        tokens      = self.norm(tokens)
+        attn_out, _ = self.attn(tokens, tokens, tokens)
+        attn_out    = self.dropout(attn_out)
+        out         = attn_out.permute(0, 2, 1).view(B, C, H, W)
+        return x + out
