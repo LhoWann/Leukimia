@@ -34,3 +34,7 @@ def apply_morphology(mask: np.ndarray) -> np.ndarray:
     mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel, iterations=1)
     return mask
+
+def detect_contours(mask: np.ndarray) -> list:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return list(contours)
