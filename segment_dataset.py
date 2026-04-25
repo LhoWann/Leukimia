@@ -5,6 +5,8 @@ import cv2
 AREA_MIN   = 2000
 AREA_MAX   = 80000
 PURPLE_MIN = 0.15
+IMG_SIZE   = (224, 224)
+PADDING    = 40
 
 def md5_hash(filepath: str) -> str:
     # Menghitung hash MD5 untuk deduplication.
@@ -56,3 +58,30 @@ def filter_contours(contours: list, mask: np.ndarray) -> list:
             continue
         valid.append(cnt)
     return valid
+
+def crop_and_resize(img: np.ndarray, contours: list) -> list[np.ndarray]:
+    h_img, w_img = img.shape[:2]
+    crops = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        x1   = max(0, x - PADDING)
+        y1   = max(0, y - PADDING)
+        x2   = min(w_img, x + w + PADDING)
+        y2   = min(h_img, y + h + PADDING)
+        crop = img[y1:y2, x1:x2]
+        crop = cv2.resize(crop, IMG_SIZE)
+        crops.append(crop)
+    return crops
+
+def segment_cells_from_smear(image_path: str) -> list[np.ndarray]:
+    img, hsv = load_image_as_hsv(image_path)       # Tahap 1 & 2
+    if img is None:
+        return []
+
+    mask = apply_hsv_threshold(hsv)                 # Tahap 3
+    mask = apply_morphology(mask)                   # Tahap 4
+    contours = detect_contours(mask)                # Tahap 5
+    contours = filter_contours(contours, mask)      # Tahap 6 & 7
+    crops    = crop_and_resize(img, contours)       # Tahap 8 & 9
+
+    return crops
