@@ -23,3 +23,8 @@ def load_image_as_hsv(image_path: str) -> tuple[np.ndarray, np.ndarray] | tuple[
         return None, None
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     return img, hsv
+
+def apply_hsv_threshold(hsv: np.ndarray) -> np.ndarray:
+    lower = np.array([110, 80,  50])
+    upper = np.array([170, 255, 255])
+    return cv2.inRange(hsv, lower, upper)
