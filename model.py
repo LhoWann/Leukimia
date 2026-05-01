@@ -2,6 +2,7 @@
 import timm
 import torch
 import torch.nn as nn
+import numpy as np
 
 BACKBONE_NAME = "convnextv2_tiny.fcmae_ft_in22k_in1k"
 
@@ -51,3 +52,45 @@ class ClassificationHead(nn.Module):
         x = self.flatten(x)
         x = self.dropout(x)
         return self.fc(x)
+    
+class LeukemiaClassifier(nn.Module):
+    def __init__(self, num_classes: int = 3, pretrained: bool = True, dropout: float = 0.3):
+        super().__init__()
+        self.backbone, out_channels = build_backbone(pretrained=pretrained)
+        self.attention = SpatialAttentionBlock(embed_dim=out_channels)
+        self.head      = ClassificationHead(in_features=out_channels, num_classes=num_classes, dropout=dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feats = self.backbone(x)
+        x     = feats[-1]
+        x     = self.attention(x)
+        return self.head(x)
+    
+class GradCAM:
+    def __init__(self, model: LeukemiaClassifier):
+        self.model        = model
+        self._gradients   = None
+        self._activations = None
+        model.attention.register_forward_hook(self._save_activation)
+        model.attention.register_full_backward_hook(self._save_gradient)
+
+    def _save_activation(self, module, input, output):
+        self._activations = output.detach()
+
+    def _save_gradient(self, module, grad_input, grad_output):
+        self._gradients = grad_output[0].detach()
+
+    def generate(self, x: torch.Tensor, class_idx: int = None) -> np.ndarray:
+        self.model.eval()
+        logits = self.model(x)
+        if class_idx is None:
+            class_idx = logits.argmax(dim=1).item()
+        self.model.zero_grad()
+        logits[0, class_idx].backward()
+        weights = self._gradients.mean(dim=[2, 3], keepdim=True)
+        cam     = (weights * self._activations).sum(dim=1, keepdim=True)
+        cam     = torch.relu(cam)
+        cam     = cam.squeeze().cpu().numpy()
+        cam    -= cam.min()
+        cam    /= cam.max() + 1e-8
+        return cam
