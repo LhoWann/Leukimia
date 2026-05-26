@@ -1,108 +1,108 @@
-# Leukemia Classification — FocusAugMix & ConvNeXt V2
+# Leukemia Classification: FocusAugMix & ConvNeXt V2
 
-Deteksi **Acute Lymphoblastic Leukemia (ALL)** dari citra mikroskopis sel darah menggunakan arsitektur **FocusAugMix** yang dipadukan dengan **ConvNeXt V2 Tiny + Multi-Head Attention**. Pipeline dibangun di atas **PyTorch Lightning** untuk training yang bersih, modular, dan mudah di-debug.
+Automated Detection of Acute Lymphoblastic Leukemia (ALL) from Blood Smear Microscopy Images
 
 ---
 
 ## Daftar Isi
 
+- [Abstrak &amp; Latar Belakang](#abstrak--latar-belakang)
 - [Dataset](#dataset)
-- [Arsitektur](#arsitektur)
+- [Arsitektur &amp; Metodologi](#arsitektur--metodologi)
 - [Struktur Proyek](#struktur-proyek)
-- [Instalasi](#instalasi)
-- [Cara Penggunaan](#cara-penggunaan)
-- [Konfigurasi](#konfigurasi)
-- [Output & Checkpoint](#output--checkpoint)
-- [Requirements](#requirements)
+- [Instalasi &amp; Setup](#instalasi--setup)
+- [Persiapan Data](#persiapan-data)
+- [Quick Start](#quick-start)
+- [Eksperimen &amp; Konfigurasi](#eksperimen--konfigurasi)
+- [Output &amp; Checkpoint Management](#output--checkpoint-management)
+- [Troubleshooting](#troubleshooting)
+- [Referensi](#referensi)
+
+---
+
+## Abstrak & Latar Belakang
+
+ALL (Acute Lymphoblastic Leukemia) adalah jenis kanker darah yang paling umum pada anak-anak. Diagnosis awal memerlukan identifikasi akurat blast cells (sel abnormal) dalam sampel darah melalui pemeriksaan mikroskopis.
+
+Proyek ini mengembangkan sistem klasifikasi berbasis AI untuk mengotomasi deteksi ALL dengan kombinasi:
+
+- ConvNeXt V2 Tiny (backbone efisien 18M parameters)
+- Multi-Head Attention (penangkapan fitur spasial)
+- FocusAugMix (augmentasi saliency-aware menggunakan SLIC Superpixels dan Grad-CAM)
+- PyTorch Lightning (framework training yang reproducible)
 
 ---
 
 ## Dataset
 
-Proyek ini menggunakan **ALL-IDB (Acute Lymphoblastic Leukemia Image Database)**:
+Proyek menggunakan ALL-IDB (Acute Lymphoblastic Leukemia Image Database) yang terdiri dari dua versi:
 
-| Dataset   | Format                      | Lokasi             | Keterangan                                                  |
-|-----------|-----------------------------|--------------------|-------------------------------------------------------------|
-| ALL-IDB1  | Full blood smear (`.jpg`)   | `data/ALL_IDB1/im/` | Gambar smear lengkap + file `.xyc` berisi koordinat sentroid sel blast |
-| ALL-IDB2  | Single cell (`.tif`/`.jpg`) | `data/ALL_IDB2/img/`| Gambar sel tunggal yang sudah di-crop                       |
+| Versi    | Format                        | Deskripsi                                        | Jumlah      |
+| -------- | ----------------------------- | ------------------------------------------------ | ----------- |
+| ALL-IDB1 | `.jpg` full smear           | Gambar darah lengkap dengan koordinat blast cell | ~108 gambar |
+| ALL-IDB2 | `.tif`/`.jpg` single cell | Sel individual pre-cropped                       | ~260 gambar |
 
-### Konvensi Penamaan File
+### Proses Preprocessing (segment_dataset.py)
 
-Nama file mengikuti pola `ImXXX_Y` dimana:
-- `Y = 1` → kelas **Abnormal** (sel blast / ALL positif)
-- `Y = 0` → kelas **Normal**
+ALL-IDB1 Abnormal: Crop 257x257 px di sekitar koordinat dari file `.xyc`
+ALL-IDB1 Normal: Deteksi otomatis WBC menggunakan HSV thresholding + morphological operations
+ALL-IDB2: Copy langsung ke folder yang sesuai
 
-### Format File `.xyc`
-
-File koordinat untuk ALL-IDB1 berformat teks, satu koordinat per baris:
-
-```
-X1 Y1
-X2 Y2
-...
-```
-
-Setiap baris merepresentasikan sentroid satu sel blast dalam gambar smear.
+Split: 80% train / 20% val dengan kontrol data leakage (semua crop dari gambar sama masuk set yang sama)
 
 ---
 
-## Arsitektur
+## Arsitektur & Metodologi
 
-### Preprocessing Pipeline (`segment_dataset.py`)
-
-```
-ALL-IDB1 (full smear)
-  └── Baca .xyc → ambil (cx, cy) tiap sel blast
-      └── Crop 257×257 di sekitar sentroid → simpan ke Abnormal/
-  └── Gambar Normal (Y=0, tanpa .xyc) → center crop 257×257 → simpan ke Normal/
-
-ALL-IDB2 (single cell)
-  └── Copy langsung, resize ke 257×257 jika perlu
-      └── Label dari suffix _Y → Abnormal/ atau Normal/
-
-Split 80:20 dilakukan di level source image → tidak ada data leakage
-```
-
-### FocusAugMix (`data_module.py`)
-
-Augmentasi spasial adaptif yang sadar konten medis:
-
-1. **SLIC Superpixels** — membagi gambar A menjadi segmen-segmen superpixel
-2. **Spectral Residual Saliency (FFT)** — mengidentifikasi area paling informatif dari gambar B menggunakan log-spectrum FFT
-3. **Grad-CAM Fusion** — jika tersedia, peta Grad-CAM dari epoch sebelumnya digabungkan dengan saliency map (bobot 0.6 saliency + 0.4 Grad-CAM)
-4. **Saliency-Guided Mixing** — sepertiga superpixel paling salient dari gambar B ditempel ke gambar A
-5. **Soft Label Output** — dataset me-return `(image, target_a, target_b, λ)` untuk mixup loss
-
-### Model (`lightning_model.py`)
+### Preprocessing Pipeline
 
 ```
-Input (B, 3, 224, 224)
-  │
-  ▼
+(1) ALL-IDB1 (full smear, 80% train / 20% val)
+     File "_1" -> Ambil (x,y) dari .xyc -> Crop sel -> Abnormal/
+     File "_0" -> Deteksi sel WBC manual -> Crop sel -> Normal/
+
+(2) ALL-IDB2 (single cell, 80% train / 20% val)
+     File "_1" -> Copy -> Abnormal/
+     File "_0" -> Copy -> Normal/
+```
+
+### Augmentasi Data: FocusAugMix
+
+Strategi mixing augmentation yang boundary-aware:
+
+1. SLIC Superpixels: Segmentasi gambar jadi ~50 region semantik
+2. Saliency Extraction: Compute saliency map untuk highlight region informatif
+3. Grad-CAM (opsional): Online regenerasi setiap 5 epoch dari model aktual
+4. Kombinasi: Pilih superpixels berdasarkan saliency score, paste ke gambar lain dengan label mixing
+
+### Arsitektur Model
+
+```
+Input: (B, 3, 224, 224)
+  |
+  v
 ConvNeXt V2 Tiny (pretrained: fcmae_ft_in22k_in1k)
-  │  global_pool='' → feature map (B, C, H, W)
-  │
-  ▼
-Spatial Reshape → (H×W, B, C)
-  │
-  ▼
-Multi-Head Self-Attention (8 heads) + LayerNorm + Residual
-  │
-  ▼
-AdaptiveAvgPool2d → (B, C)
-  │
-  ▼
-Dropout(0.3) → Linear → Logits (B, num_classes)
+  - Stage 1-3: Feature extraction
+  - Stage 3: Output (B, 384, 14, 14) <- Multi-Head Attention di sini (default)
+      |
+      v----- Multi-Head Self-Attention Block -----
+      | Reshape to tokens: (B, 196, 384)
+      | Linear + MultiheadAttention (8 heads)
+      | Residual connection + LayerNorm
+      | Output: (B, 384, 14, 14)
+  - Stage 4: Final feature extraction
+  |
+  v
+AdaptiveAvgPool2d -> Dropout(0.3) -> Linear(num_classes)
 ```
 
-**Grad-CAM** di-attach via `register_forward_hook` dan `register_full_backward_hook` pada stage terakhir backbone.
+Layer-wise Learning Rate Decay (LLRD):
 
-### Training
-
-- **Loss**: `Σ [λᵢ · CE(pred, target_a) + (1-λᵢ) · CE(pred, target_b)]` (per-sample, lalu `.mean()`)
-- **Optimizer**: AdamW (`lr=1e-4`, `weight_decay=1e-4`)
-- **Scheduler**: ReduceLROnPlateau (`factor=0.5`, `patience=3`, monitor `val_loss`)
-- **Gradient Clipping**: `max_norm=1.0` (dihandle otomatis oleh Lightning Trainer)
+- Stage 4 (deepest): lr × 1.00
+- Stage 3: lr × 0.75
+- Stage 2: lr × 0.56
+- Stage 1: lr × 0.42
+- Head: lr × 0.32
 
 ---
 
@@ -111,29 +111,31 @@ Dropout(0.3) → Linear → Logits (B, num_classes)
 ```
 .
 ├── src/
-│   ├── segment_dataset.py   # Preprocessing: .xyc cropping + IDB2 copy + split
-│   ├── data_module.py       # LightningDataModule + FocusAugMixDataset
-│   ├── lightning_model.py   # LightningModule: ConvNeXtV2 + Attention + Grad-CAM
-│   └── main.py              # Entry point: Trainer.fit()
+│   ├── segment_dataset.py          # Dataset creation dari ALL-IDB raw
+│   ├── data_module.py              # PyTorch Dataset, DataModule, augmentation
+│   ├── lightning_model.py          # Lightning module, model, optimizer
+│   └── main.py                     # CLI, experiment registry, trainer
 │
-├── data/
+├── data/                           # Raw data (populate manually)
 │   ├── ALL_IDB1/
-│   │   ├── im/              # Full blood smear images (ImXXX_Y.jpg)
-│   │   └── xyc/             # Centroid coordinates (ImXXX_Y.xyc)
+│   │   ├── im/                     # ImXXX_[01].jpg
+│   │   └── xyc/                    # ImXXX_[01].xyc
 │   └── ALL_IDB2/
-│       └── img/             # Pre-cropped single cells (ImXXX_Y.tif/.jpg)
+│       └── img/                    # ImXXX_[01].tif
 │
-├── dataset/                 # Dibuat otomatis oleh segment_dataset.py
-│   ├── train/
-│   │   ├── Abnormal/
-│   │   └── Normal/
-│   └── val/
-│       ├── Abnormal/
-│       └── Normal/
+├── dataset/                        # Generated by segment_dataset.py
+│   ├── train/ {Abnormal, Normal}
+│   └── val/   {Abnormal, Normal}
 │
-├── checkpoints/             # Dibuat otomatis saat training
-│   ├── leukemia-XX-X.XXXX.ckpt   # Best checkpoint
-│   └── last.ckpt
+├── checkpoints/                    # Model checkpoints
+│   ├── baseline/
+│   ├── focusmix_mha/
+│   └── ...
+│
+├── logs/                           # CSV logging
+│   ├── baseline/
+│   ├── focusmix_mha/
+│   └── ...
 │
 ├── requirements.txt
 └── README.md
@@ -141,14 +143,26 @@ Dropout(0.3) → Linear → Logits (B, num_classes)
 
 ---
 
-## Instalasi
+## Instalasi & Setup
 
-### 1. Clone & Buat Virtual Environment
+### Prasyarat
+
+- Python 3.9+ (tested on 3.10, 3.11)
+- GPU recommended (CUDA 11.8+ atau CPU fallback)
+- pip atau conda
+
+### Step 1: Clone Repository
 
 ```bash
 git clone <repo-url>
 cd LEUKIMIA
+```
 
+### Step 2: Virtual Environment
+
+Menggunakan venv (recommended):
+
+```bash
 python -m venv .venv
 
 # Windows
@@ -158,163 +172,297 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-### 2. Install Dependencies
+Atau menggunakan conda:
+
+```bash
+conda create -n leukemia python=3.11
+conda activate leukemia
+```
+
+### Step 3: Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Siapkan Dataset
+Untuk CUDA support:
 
-Letakkan dataset sehingga strukturnya seperti berikut:
-
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
-data/
-├── ALL_IDB1/
-│   ├── im/     ← berisi Im001_1.jpg, Im002_0.jpg, dst.
-│   └── xyc/    ← berisi Im001_1.xyc, Im002_1.xyc, dst.
-└── ALL_IDB2/
-    └── img/    ← berisi Im001_1.tif, Im002_0.tif, dst.
+
+### Step 4: Verify Installation
+
+```bash
+python -c "import torch; print(f'PyTorch {torch.__version__}')"
+python -c "import lightning; print(f'Lightning {lightning.__version__}')"
+python -c "import timm; print(f'timm {timm.__version__}')"
 ```
 
 ---
 
-## Cara Penggunaan
+## Persiapan Data
 
-Semua script dijalankan dari folder `src/`:
+### Download ALL-IDB
+
+1. ALL-IDB1 (Full Smear): Download dari http://www.di.univr.it/?aq=node/326
+2. ALL-IDB2 (Single Cell): Download dari http://www.di.univr.it/?aq=node/411
+
+### Organize Directory
+
+```bash
+mkdir -p data/ALL_IDB1/im data/ALL_IDB1/xyc
+mkdir -p data/ALL_IDB2/img
+
+# Copy files
+cp /path/to/ALL_IDB1_im/*.jpg data/ALL_IDB1/im/
+cp /path/to/ALL_IDB1_xy/*.xyc data/ALL_IDB1/xyc/
+cp /path/to/ALL_IDB2_img/*.tif data/ALL_IDB2/img/
+```
+
+### Run Segmentation
 
 ```bash
 cd src
-```
-
-### Langkah 1 — Segmentasi & Persiapan Dataset
-
-Script ini membaca koordinat `.xyc`, men-crop sel dari ALL-IDB1, menyalin ALL-IDB2, dan membagi data ke `dataset/train` dan `dataset/val`.
-
-```bash
 python segment_dataset.py
 ```
 
-Output yang diharapkan:
+Expected output:
 
 ```
-Processing ALL-IDB1
-  IDB1 -> train: 89, val: 22
+=== ALL-IDB1 Processing ===
+Splitting 108 images: 86 train, 22 val
 
-Processing ALL-IDB2
-  IDB2 -> train: 180, val: 45
+Processing abnormal cells from ALL_IDB1...
+  Cropped 320 abnormal cells (train)
+  Cropped 80 abnormal cells (val)
 
-Train set:
-  Normal: 134 images
-  Abnormal: 135 images
+Processing normal cells from ALL_IDB1...
+  Detected & cropped 80 normal cells (train)
+  Detected & cropped 20 normal cells (val)
 
-Val set:
-  Normal: 33 images
-  Abnormal: 34 images
+=== ALL-IDB2 Processing ===
+  Copied 52 abnormal cells (train)
+  Copied 13 abnormal cells (val)
+  Copied 104 normal cells (train)
+  Copied 26 normal cells (val)
+
+=== Summary ===
+Train: 556 images (Abnormal: 372, Normal: 184)
+Val: 139 images (Abnormal: 93, Normal: 46)
+Total: 695 images
 ```
 
-> **Catatan:** Folder `dataset/` akan dihapus dan dibuat ulang setiap kali script ini dijalankan.
+---
 
-### Langkah 2 — Training
+## Quick Start
+
+### Run Single Experiment
 
 ```bash
-python main.py
+cd src
+python main.py --exp focusmix_mha
 ```
 
-Lightning Trainer akan otomatis:
-- Mendeteksi GPU/CPU yang tersedia
-- Menampilkan progress bar per epoch
-- Menyimpan checkpoint terbaik berdasarkan `val_loss` ke folder `checkpoints/`
+Training parameters:
 
-Output log per epoch:
+- Model: ConvNeXt V2 Tiny + Multi-Head Attention
+- Augmentation: FocusAugMix (SLIC + Saliency)
+- Epochs: 50 (dengan early stopping)
+- Batch size: 32
+
+### Run All Experiments Sequentially
+
+```bash
+cd src
+python main.py --all
+```
+
+Ini akan menjalankan semua experiment secara berurutan:
+
+1. `baseline` - ConvNeXt V2 only, standard augmentation (baseline performance floor)
+2. `mha_only` - Tambah Multi-Head Attention, tanpa mixing augmentation
+3. `saliency_mix` - Rectangular saliency-guided patch mixing
+4. `focusmix_v2` - SLIC Superpixels + Saliency (no MHA)
+5. `focusmix_mha` - SLIC Superpixels + Saliency + MHA
+6. `focusmix_full` - Complete system dengan online Grad-CAM
+7. `focusmix_aggressive` - Increased mixing ratio (35%) untuk dataset kecil
+
+Training akan disimpan di checkpoint terpisah untuk setiap experiment.
+
+### Monitor Training
+
+Real-time logging di console + CSV logs:
 
 ```
-Epoch 5: train_loss=0.312 val_loss=0.287 val_acc=0.891
+logs/focusmix_mha/version_0/metrics.csv
 ```
 
-### (Opsional) Melanjutkan Training dari Checkpoint
-
-Tambahkan argumen `ckpt_path` ke `trainer.fit()` di `main.py`:
+Plot results dengan pandas:
 
 ```python
-trainer.fit(model, datamodule=datamodule, ckpt_path='checkpoints/last.ckpt')
+import pandas as pd
+df = pd.read_csv('logs/focusmix_mha/version_0/metrics.csv')
+df.plot(x='epoch', y=['train_loss', 'val_loss'])
 ```
 
-### (Opsional) Menjalankan Validasi Saja
+### Evaluate pada Best Checkpoint
 
 ```python
-trainer.validate(model, datamodule=datamodule, ckpt_path='checkpoints/leukemia-XX-X.XXXX.ckpt')
+from src.lightning_model import LeukemiaLightningModel
+from src.data_module import LeukemiaDataModule
+import lightning as L
+
+ckpt_path = 'checkpoints/focusmix_mha/epoch=XX-val_acc=XXXX.ckpt'
+model = LeukemiaLightningModel.load_from_checkpoint(ckpt_path)
+dm = LeukemiaDataModule(data_dir='dataset', batch_size=32)
+dm.setup()
+
+trainer = L.Trainer(devices='auto')
+trainer.validate(model, dm)
 ```
 
 ---
 
-## Konfigurasi
+## Eksperimen & Konfigurasi
 
-Semua hyperparameter utama berada di `main.py` dan dapat disesuaikan langsung:
+### Available Experiments
 
-| Parameter         | Default     | Lokasi                  | Keterangan                                      |
-|-------------------|-------------|-------------------------|-------------------------------------------------|
-| `data_dir`        | `'dataset'` | `LeukemiaDataModule`    | Path ke dataset hasil preprocessing             |
-| `batch_size`      | `16`        | `LeukemiaDataModule`    | Sesuaikan dengan VRAM GPU                       |
-| `num_workers`     | `2`         | `LeukemiaDataModule`    | Jumlah worker DataLoader                        |
-| `n_segments`      | `100`       | `LeukemiaDataModule`    | Jumlah superpixel SLIC                          |
-| `compactness`     | `10`        | `LeukemiaDataModule`    | Kompaksi superpixel SLIC                        |
-| `lr`              | `1e-4`      | `LeukemiaLightningModel`| Learning rate AdamW                             |
-| `weight_decay`    | `1e-4`      | `LeukemiaLightningModel`| Weight decay AdamW                              |
-| `max_epochs`      | `30`        | `Trainer`               | Jumlah epoch maksimum                           |
-| `gradient_clip_val` | `1.0`     | `Trainer`               | Nilai clipping gradient                         |
-| `CROP_SIZE`       | `257`       | `segment_dataset.py`    | Ukuran crop sel dalam piksel                    |
-| `SPLIT_RATIO`     | `0.8`       | `segment_dataset.py`    | Rasio train/val split                           |
+| Experiment          | MHA | Augmentation                | Use Case                 |
+| ------------------- | --- | --------------------------- | ------------------------ |
+| baseline            | No  | Standard crops/flips        | Performance floor        |
+| mha_only            | Yes | Standard crops/flips        | Isolate MHA contribution |
+| saliency_mix        | No  | Saliency-weighted patches   | Simple augmentation      |
+| focusmix_v2         | No  | SLIC + Saliency             | Lightweight mixing aug   |
+| focusmix_mha        | Yes | SLIC + Saliency + MHA       | Recommended balanced     |
+| focusmix_full       | Yes | SLIC + Saliency + Grad-CAM  | Most comprehensive       |
+| focusmix_aggressive | Yes | SLIC + Saliency (35% ratio) | For very small datasets  |
+
+### Key Hyperparameters
+
+| Parameter       | Default | Range        | Description                 |
+| --------------- | ------- | ------------ | --------------------------- |
+| batch_size      | 32      | 8-64         | Adjust untuk GPU VRAM       |
+| lr              | 1e-4    | 1e-5 to 1e-3 | Base learning rate          |
+| llrd            | 0.75    | 0.5-0.99     | Layer-wise decay factor     |
+| max_epochs      | 50      | 20-100       | Maximum training epochs     |
+| warmup_epochs   | 5       | 2-10         | Warmup sebelum cosine decay |
+| aug_prob        | 0.5     | 0.0-1.0      | Probability augmentation    |
+| paste_ratio     | 0.25    | 0.1-0.5      | Fraction for mixing         |
+| n_segments      | 50      | 30-100       | SLIC superpixel count       |
+| label_smoothing | 0.05    | 0.0-0.1      | Label smoothing value       |
 
 ---
 
-## Output & Checkpoint
+## Output & Checkpoint Management
 
-Setelah training selesai, file berikut akan tersedia:
+### Directory Structure
 
 ```
 checkpoints/
-├── leukemia-{epoch:02d}-{val_loss:.4f}.ckpt   # Model terbaik (val_loss terendah)
-└── last.ckpt                                   # Checkpoint epoch terakhir
+├── baseline/
+│   ├── epoch=XX-val_acc=0.8234.ckpt
+│   └── last.ckpt
+├── focusmix_mha/
+│   ├── epoch=YY-val_acc=0.9123.ckpt
+│   └── last.ckpt
+└── ...
+
+logs/
+├── baseline/version_0/metrics.csv
+├── focusmix_mha/version_0/metrics.csv
+└── ...
 ```
 
-Untuk memuat model dari checkpoint:
+### CSV Logging
 
-```python
-from lightning_model import LeukemiaLightningModel
+Setiap experiment log ke `logs/<exp_name>/version_0/metrics.csv`:
 
-model = LeukemiaLightningModel.load_from_checkpoint('checkpoints/leukemia-XX-X.XXXX.ckpt')
-model.eval()
+```csv
+epoch,train_loss,val_loss,train_acc,val_acc,train_f1,val_f1,learning_rate
+0,2.345,2.123,0.45,0.52,0.40,0.48,0.0001
+1,1.890,1.756,0.62,0.68,0.59,0.65,0.0001
+...
+49,0.234,0.301,0.94,0.92,0.93,0.91,0.000005
 ```
 
-Untuk inferensi Grad-CAM pada gambar tunggal:
+### Resume Training
 
 ```python
-import torch
-from PIL import Image
-from torchvision import transforms
+trainer.fit(model, datamodule=dm, ckpt_path='checkpoints/focusmix_mha/last.ckpt')
+```
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
+### Export Model untuk Inference
 
-img = transform(Image.open('path/to/cell.jpg').convert('RGB')).unsqueeze(0)
-logits, cam = model.model.get_gradcam(img)
-pred_class = logits.argmax(dim=1).item()
+```python
+model = LeukemiaLightningModel.load_from_checkpoint(best_ckpt)
+scripted = torch.jit.script(model)
+torch.jit.save(scripted, 'models/leukemia_classifier.pt')
 ```
 
 ---
 
-## Requirements
+## Troubleshooting
 
-- Python 3.10+
-- PyTorch 2.0+
-- PyTorch Lightning 2.0+ (`lightning`)
-- timm
-- torchmetrics
-- scikit-image
-- opencv-python
-- Pillow
-- numpy
+### CUDA Out of Memory
+
+Reduce batch size di `src/main.py` -> `ExperimentConfig` -> `batch_size = 16`
+
+### Segmentation Script Error: "*.xyc file not found"
+
+Pastikan ALL_IDB1 abnormal coordinates sudah didownload:
+
+```bash
+ls data/ALL_IDB1/xyc/ | head -5
+# Should show: Im001_1.xyc, Im002_1.xyc, ...
+```
+
+### Very Low Validation Accuracy
+
+1. Verifikasi dataset tersegmentasi dengan baik:
+
+   ```bash
+   python segment_dataset.py
+   ```
+2. Train baseline dengan fixed seed:
+
+   ```bash
+   python main.py --exp baseline --seed 42
+   ```
+3. Check training vs validation accuracy di logs CSV
+
+### Training Too Slow
+
+1. Kurangi num_workers jika CPU bottleneck: `LeukemiaDataModule(..., num_workers=4)`
+2. Use precision='32' jika GPU tidak support bfloat16
+3. Skip Grad-CAM: gunakan `focusmix_v2` daripada `focusmix_full`
+
+### Import Errors
+
+```bash
+pip install --upgrade -r requirements.txt
+```
+
+---
+
+## Referensi
+
+### Papers & Methods
+
+- ConvNeXt V2: Liu et al., "A ConvNet for the 2020s" (CVPR 2023)
+- Mustaqim, T., Fatichah, C., Suciati, N., Obi, T., & Lee, J. (2025). FocusAugMix: A data augmentation method for enhancing Acute Lymphoblastic Leukemia classification.  *Intelligent Systems With Applications* ,  *26* , 200512. **https://doi.org/10.1016/j.iswa.2025.200512**
+
+### Dataset
+
+```bibtex
+@article{ALL_IDB,
+  title={ALL-IDB: The Acute Lymphoblastic Leukemia Image Database for Image Processing},
+  author={Labati, R. D. and Pistore, V. and Scotti, F.},
+  journal={IEEE Transactions on Biomedical Engineering},
+  year={2011}
+}
+```
+
+---
+
+**Last Updated**: 2024-05-26
