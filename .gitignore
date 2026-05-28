@@ -1,6 +1,8 @@
 __pycache__
 .venv
+checkpoints
 data
 dataset
-lightning_logs
-checkpoints
+logs
+PKG_C_NMC 2019
+result

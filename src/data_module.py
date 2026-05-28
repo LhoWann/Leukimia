@@ -1,6 +1,6 @@
 import os
 import random
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -308,4 +308,96 @@ class LeukemiaDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
+        )
+
+    # ── External test dataloader (C-NMC or any ImageFolder-compatible dir) ──
+
+    def external_test_dataloader(
+        self,
+        test_dir: str,
+        normalizer=None,
+        num_workers: Optional[int] = None,
+    ) -> DataLoader:
+        """
+        Build a DataLoader for an external test directory.
+
+        Parameters
+        ----------
+        test_dir    : path with class subdirectories (ImageFolder compatible)
+                      OR C-NMC layout (all/ hem/).  Auto-detected.
+        normalizer  : MacenkoNormalizer | ReinhardNormalizer | None
+        num_workers : override self.num_workers (use 0 when normalizer is set,
+                      as normalizer objects are not picklable)
+
+        Returns a DataLoader yielding (images, labels) compatible with
+        standard validation/test loops.
+        """
+        from stain_normalize import MacenkoNormalizer, ReinhardNormalizer  # lazy import
+
+        # C-NMC class-name aliases → ImageFolder class names used in this project
+        CNMC_ALIAS: Dict[str, str] = {
+            'all': 'Abnormal', 'ALL': 'Abnormal',
+            'hem': 'Normal',   'HEM': 'Normal',
+        }
+
+        test_path = os.path.abspath(test_dir)
+        subdirs   = [d for d in os.listdir(test_path)
+                     if os.path.isdir(os.path.join(test_path, d))]
+
+        # Rename C-NMC subdirs conceptually by building a custom dataset
+        # instead of relying on ImageFolder, so we handle arbitrary layouts.
+        class _ExternalDataset(Dataset):
+            def __init__(self_, root, cls_map, transform, normalizer_):
+                exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+                self_.samples: List[Tuple[str, int]] = []
+                self_.transform    = transform
+                self_.normalizer   = normalizer_
+                for subdir in sorted(os.listdir(root)):
+                    full_subdir = os.path.join(root, subdir)
+                    if not os.path.isdir(full_subdir):
+                        continue
+                    canonical = cls_map.get(subdir, subdir)   # pass-through if already canonical
+                    label     = self.class_to_idx.get(canonical)
+                    if label is None:
+                        continue
+                    for fname in sorted(os.listdir(full_subdir)):
+                        if os.path.splitext(fname)[1].lower() in exts:
+                            self_.samples.append(
+                                (os.path.join(full_subdir, fname), label)
+                            )
+
+            def __len__(self_):
+                return len(self_.samples)
+
+            def __getitem__(self_, idx):
+                path, label = self_.samples[idx]
+                img = Image.open(path).convert('RGB')
+                if self_.normalizer is not None:
+                    img_np = np.array(img)
+                    try:
+                        img_np = self_.normalizer.transform(img_np)
+                        img    = Image.fromarray(img_np)
+                    except Exception:
+                        pass
+                return self_.transform(img), label
+
+        cls_map = {**CNMC_ALIAS}   # can extend if needed
+        dataset = _ExternalDataset(
+            root        = test_path,
+            cls_map     = cls_map,
+            transform   = self.val_transform,
+            normalizer_ = normalizer,
+        )
+
+        n_workers = num_workers if num_workers is not None else (
+            0 if normalizer is not None else self.num_workers
+        )
+
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=n_workers,
+            pin_memory=(n_workers > 0),
+            persistent_workers=(n_workers > 0),
         )

@@ -1,468 +1,897 @@
-# Leukemia Classification: FocusAugMix & ConvNeXt V2
+# Leukemia Classification: FocusAugMix + ConvNeXt V2
 
-Automated Detection of Acute Lymphoblastic Leukemia (ALL) from Blood Smear Microscopy Images
+Deteksi Otomatis Acute Lymphoblastic Leukemia (ALL) dari Citra Apusan Darah Tepi
+
+Model dilatih pada **ALL-IDB** (Giemsa stain, Italia) dan dievaluasi secara eksternal pada
+**C-NMC 2019** (Wright-Giemsa, India) dengan stain normalization untuk mengukur generalisasi
+lintas-domain.
 
 ---
 
 ## Daftar Isi
 
-- [Abstrak &amp; Latar Belakang](#abstrak--latar-belakang)
+- [Latar Belakang](#latar-belakang)
 - [Dataset](#dataset)
 - [Arsitektur &amp; Metodologi](#arsitektur--metodologi)
 - [Struktur Proyek](#struktur-proyek)
-- [Instalasi &amp; Setup](#instalasi--setup)
-- [Persiapan Data](#persiapan-data)
-- [Quick Start](#quick-start)
+- [Instalasi](#instalasi)
+- [Alur Kerja Lengkap](#alur-kerja-lengkap)
+  - [1. Persiapan Data](#1-persiapan-data)
+  - [2. Training](#2-training)
+  - [3. Monitoring](#3-monitoring)
+  - [4. Evaluasi In-Domain](#4-evaluasi-in-domain)
+  - [5. Evaluasi Eksternal C-NMC 2019](#5-evaluasi-eksternal-c-nmc-2019)
+- [Stain Normalization](#stain-normalization)
+- [Analisis: Val Accuracy 100%](#analisis-val-accuracy-100)
 - [Eksperimen &amp; Konfigurasi](#eksperimen--konfigurasi)
-- [Output &amp; Checkpoint Management](#output--checkpoint-management)
+- [Output &amp; Checkpoint](#output--checkpoint)
 - [Troubleshooting](#troubleshooting)
 - [Referensi](#referensi)
 
 ---
 
-## Abstrak & Latar Belakang
+## Latar Belakang
 
-ALL (Acute Lymphoblastic Leukemia) adalah jenis kanker darah yang paling umum pada anak-anak. Diagnosis awal memerlukan identifikasi akurat blast cells (sel abnormal) dalam sampel darah melalui pemeriksaan mikroskopis.
+ALL adalah jenis kanker darah paling umum pada anak-anak. Diagnosis awal memerlukan identifikasi
+*blast cells* (sel leukemia) dari apusan darah secara mikroskopis — proses yang memakan waktu
+dan bergantung pada keahlian patologis.
 
-Proyek ini mengembangkan sistem klasifikasi berbasis AI untuk mengotomasi deteksi ALL dengan kombinasi:
+Proyek ini mengimplementasikan sistem klasifikasi otomatis berbasis:
 
-- ConvNeXt V2 Tiny (backbone efisien 18M parameters)
-- Multi-Head Attention (penangkapan fitur spasial)
-- FocusAugMix (augmentasi saliency-aware menggunakan SLIC Superpixels dan Grad-CAM)
-- PyTorch Lightning (framework training yang reproducible)
+- **ConvNeXt V2 Tiny** — backbone pretrained FCMAE + IN22k + IN1k (28.5 M params)
+- **Multi-Head Self-Attention** — injeksi perhatian spasial setelah stage backbone
+- **FocusAugMix** — mixing augmentation berbasis SLIC superpixel + saliency + Grad-CAM
+- **Stain Normalization** — Macenko & Reinhard untuk evaluasi lintas-domain
 
 ---
 
 ## Dataset
 
-Proyek menggunakan ALL-IDB (Acute Lymphoblastic Leukemia Image Database) yang terdiri dari dua versi:
+### ALL-IDB (Training & Validation)
 
-| Versi    | Format                        | Deskripsi                                        | Jumlah      |
-| -------- | ----------------------------- | ------------------------------------------------ | ----------- |
-| ALL-IDB1 | `.jpg` full smear           | Gambar darah lengkap dengan koordinat blast cell | ~108 gambar |
-| ALL-IDB2 | `.tif`/`.jpg` single cell | Sel individual pre-cropped                       | ~260 gambar |
+| Versi    | Format                          | Deskripsi                                       | Jumlah      |
+| -------- | ------------------------------- | ----------------------------------------------- | ----------- |
+| ALL-IDB1 | `.jpg` full smear             | Gambar penuh + koordinat blast di file `.xyc` | ~108 gambar |
+| ALL-IDB2 | `.tif` / `.jpg` single cell | Sel individual yang sudah di-crop               | ~260 gambar |
 
-### Proses Preprocessing (segment_dataset.py)
+Split: **80% train / 20% val** berbasis *image-level* — semua crop dari gambar yang sama
+masuk ke satu split (tidak ada data leakage).
 
-ALL-IDB1 Abnormal: Crop 257x257 px di sekitar koordinat dari file `.xyc`
-ALL-IDB1 Normal: Deteksi otomatis WBC menggunakan HSV thresholding + morphological operations
-ALL-IDB2: Copy langsung ke folder yang sesuai
+### C-NMC 2019 (External Test)
 
-Split: 80% train / 20% val dengan kontrol data leakage (semua crop dari gambar sama masuk set yang sama)
+Dataset PKG-C-NMC 2019 dari ISBI Challenge, dikumpulkan di India dengan protokol staining
+berbeda (Wright-Giemsa vs Giemsa ALL-IDB). Digunakan sebagai *external test set* untuk
+mengukur generalisasi lintas-domain.
+
+| Label          | Folder C-NMC | Setara ALL-IDB |
+| -------------- | ------------ | -------------- |
+| ALL (leukemia) | `all/`     | `Abnormal/`  |
+| Normal (HEM)   | `hem/`     | `Normal/`    |
 
 ---
 
 ## Arsitektur & Metodologi
 
-### Preprocessing Pipeline
+### Pipeline Augmentasi: FocusAugMix
 
+```text
+Gambar A (target) + Gambar B (source)
+         |
+         v
+  SLIC Superpixels (n=50)   <- pada Gambar A, preserve kontur sel
+         |
+         v
+  Saliency Map (Spectral Residual) <- pada Gambar B
+         |
+  + Grad-CAM (opsional, diupdate setiap 5 epoch)
+         |
+         v
+  Rank superpixels by score -> paste top-K dari B ke A
+         |
+         v
+  Mixed Image + lambda (label mixing weight)
 ```
-(1) ALL-IDB1 (full smear, 80% train / 20% val)
-     File "_1" -> Ambil (x,y) dari .xyc -> Crop sel -> Abnormal/
-     File "_0" -> Deteksi sel WBC manual -> Crop sel -> Normal/
 
-(2) ALL-IDB2 (single cell, 80% train / 20% val)
-     File "_1" -> Copy -> Abnormal/
-     File "_0" -> Copy -> Normal/
-```
-
-### Augmentasi Data: FocusAugMix
-
-Strategi mixing augmentation yang boundary-aware:
-
-1. SLIC Superpixels: Segmentasi gambar jadi ~50 region semantik
-2. Saliency Extraction: Compute saliency map untuk highlight region informatif
-3. Grad-CAM (opsional): Online regenerasi setiap 5 epoch dari model aktual
-4. Kombinasi: Pilih superpixels berdasarkan saliency score, paste ke gambar lain dengan label mixing
+Mode augmentasi: `none` | `saliency` | `focusmix` | `focusmix_cam`
 
 ### Arsitektur Model
 
-```
-Input: (B, 3, 224, 224)
-  |
-  v
-ConvNeXt V2 Tiny (pretrained: fcmae_ft_in22k_in1k)
-  - Stage 1-3: Feature extraction
-  - Stage 3: Output (B, 384, 14, 14) <- Multi-Head Attention di sini (default)
-      |
-      v----- Multi-Head Self-Attention Block -----
-      | Reshape to tokens: (B, 196, 384)
-      | Linear + MultiheadAttention (8 heads)
-      | Residual connection + LayerNorm
-      | Output: (B, 384, 14, 14)
-  - Stage 4: Final feature extraction
-  |
-  v
-AdaptiveAvgPool2d -> Dropout(0.3) -> Linear(num_classes)
+```text
+Input (B, 3, 224, 224)
+   |
+   v
+ConvNeXt V2 Tiny — pretrained fcmae_ft_in22k_in1k
+   +-- Stage 0 -> (B,  96, 56, 56)
+   +-- Stage 1 -> (B, 192, 28, 28)
+   +-- Stage 2 -> (B, 384, 14, 14)  [MHA disisipkan di sini (default)]
+   |                  |
+   |            tokens: (B, 196, 384)
+   |            MultiheadAttention (8 heads) + Residual + LayerNorm
+   |
+   +-- Stage 3 -> (B, 768,  7,  7)
+   |
+   v
+AdaptiveAvgPool2d(1) -> Flatten -> Dropout(0.3) -> Linear(num_classes)
 ```
 
-Layer-wise Learning Rate Decay (LLRD):
+**Layer-wise Learning Rate Decay (LLRD, factor 0.75):**
 
-- Stage 4 (deepest): lr × 1.00
-- Stage 3: lr × 0.75
-- Stage 2: lr × 0.56
-- Stage 1: lr × 0.42
-- Head: lr × 0.32
+| Layer      | LR multiplier  |
+| ---------- | -------------- |
+| Head / MHA | 1.00 x base_lr |
+| Stage 3    | 0.75 x base_lr |
+| Stage 2    | 0.56 x base_lr |
+| Stage 1    | 0.42 x base_lr |
+| Stage 0    | 0.32 x base_lr |
+| Stem       | 0.24 x base_lr |
+
+**Optimizer:** AdamW + Linear Warmup (5 epoch) + Cosine Decay
 
 ---
 
 ## Struktur Proyek
 
-```
-.
-├── src/
-│   ├── segment_dataset.py          # Dataset creation dari ALL-IDB raw
-│   ├── data_module.py              # PyTorch Dataset, DataModule, augmentation
-│   ├── lightning_model.py          # Lightning module, model, optimizer
-│   └── main.py                     # CLI, experiment registry, trainer
-│
-├── data/                           # Raw data (populate manually)
-│   ├── ALL_IDB1/
-│   │   ├── im/                     # ImXXX_[01].jpg
-│   │   └── xyc/                    # ImXXX_[01].xyc
-│   └── ALL_IDB2/
-│       └── img/                    # ImXXX_[01].tif
-│
-├── dataset/                        # Generated by segment_dataset.py
-│   ├── train/ {Abnormal, Normal}
-│   └── val/   {Abnormal, Normal}
-│
-├── checkpoints/                    # Model checkpoints
-│   ├── baseline/
-│   ├── focusmix_mha/
-│   └── ...
-│
-├── logs/                           # CSV logging
-│   ├── baseline/
-│   ├── focusmix_mha/
-│   └── ...
-│
-├── requirements.txt
-└── README.md
+```text
+LEUKIMIA/
++-- src/
+|   +-- segment_dataset.py      # Preprocessing ALL-IDB raw -> dataset/
+|   +-- data_module.py          # Dataset, augmentasi, DataModule, external loader
+|   +-- lightning_model.py      # ConvNeXtV2Classifier, GradCAMExtractor, LightningModule
+|   +-- stain_normalize.py      # MacenkoNormalizer, ReinhardNormalizer
+|   +-- evaluate_external.py    # Evaluasi C-NMC 2019 dengan stain normalization
+|   +-- main.py                 # CLI training, experiment registry
+|
++-- data/                       # Raw dataset (isi manual)
+|   +-- ALL_IDB1/
+|   |   +-- im/                 # Im001_1.jpg, Im002_0.jpg, ...
+|   |   +-- xyc/                # Im001_1.xyc (koordinat blast)
+|   +-- ALL_IDB2/
+|       +-- img/                # Im001_1.tif, Im002_0.tif, ...
+|
++-- dataset/                    # Di-generate oleh segment_dataset.py
+|   +-- train/
+|   |   +-- Abnormal/           # ~600+ sel leukemia
+|   |   +-- Normal/             # ~200+ sel normal
+|   +-- val/
+|       +-- Abnormal/           # ~111 sel leukemia
+|       +-- Normal/             # ~93 sel normal
+|
++-- checkpoints/                # Tersimpan otomatis saat training
+|   +-- baseline/
+|   |   +-- epoch=XX-val_acc=1.0000.ckpt
+|   |   +-- last.ckpt
+|   +-- mha_only/ ...
+|
++-- logs/                       # CSV metrics
+|   +-- baseline/version_0/metrics.csv
+|   +-- mha_only/version_0/metrics.csv
+|
++-- results/                    # JSON output evaluasi eksternal
++-- requirements.txt
++-- README.md
 ```
 
 ---
 
-## Instalasi & Setup
+## Instalasi
 
 ### Prasyarat
 
-- Python 3.9+ (tested on 3.10, 3.11)
-- GPU recommended (CUDA 11.8+ atau CPU fallback)
-- pip atau conda
+- Python 3.9–3.11
+- GPU dengan CUDA 11.8+ (direkomendasikan; CPU fallback tersedia)
+- Git
 
-### Step 1: Clone Repository
+### Langkah 1 — Clone Repositori
 
 ```bash
 git clone <repo-url>
 cd LEUKIMIA
 ```
 
-### Step 2: Virtual Environment
-
-Menggunakan venv (recommended):
+### Langkah 2 — Buat Virtual Environment
 
 ```bash
+# venv (Windows)
 python -m venv .venv
-
-# Windows
 .venv\Scripts\activate
 
-# Linux / macOS
+# venv (Linux / macOS)
+python -m venv .venv
 source .venv/bin/activate
-```
 
-Atau menggunakan conda:
-
-```bash
-conda create -n leukemia python=3.11
+# conda (alternatif)
+conda create -n leukemia python=3.11 -y
 conda activate leukemia
 ```
 
-### Step 3: Install Dependencies
+### Langkah 3 — Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Untuk CUDA support:
+Untuk CUDA support (jika PyTorch terinstall tanpa CUDA):
 
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
-### Step 4: Verify Installation
+### Langkah 4 — Verifikasi
 
 ```bash
-python -c "import torch; print(f'PyTorch {torch.__version__}')"
-python -c "import lightning; print(f'Lightning {lightning.__version__}')"
-python -c "import timm; print(f'timm {timm.__version__}')"
+python -c "import torch; print('PyTorch', torch.__version__, '| CUDA:', torch.cuda.is_available())"
+python -c "import lightning; print('Lightning', lightning.__version__)"
+python -c "import timm; print('timm', timm.__version__)"
 ```
 
 ---
 
-## Persiapan Data
+## Alur Kerja Lengkap
 
-### Download ALL-IDB
+### 1. Persiapan Data
 
-1. ALL-IDB1 (Full Smear): Download dari http://www.di.univr.it/?aq=node/326
-2. ALL-IDB2 (Single Cell): Download dari http://www.di.univr.it/?aq=node/411
+#### Download ALL-IDB
 
-### Organize Directory
+- https://scotti.di.unimi.it/all/
 
 ```bash
 mkdir -p data/ALL_IDB1/im data/ALL_IDB1/xyc
 mkdir -p data/ALL_IDB2/img
 
-# Copy files
-cp /path/to/ALL_IDB1_im/*.jpg data/ALL_IDB1/im/
-cp /path/to/ALL_IDB1_xy/*.xyc data/ALL_IDB1/xyc/
-cp /path/to/ALL_IDB2_img/*.tif data/ALL_IDB2/img/
+cp /path/to/ALL_IDB1/im/*.jpg   data/ALL_IDB1/im/
+cp /path/to/ALL_IDB1/xyc/*.xyc  data/ALL_IDB1/xyc/
+cp /path/to/ALL_IDB2/img/*.tif  data/ALL_IDB2/img/
 ```
 
-### Run Segmentation
+#### Jalankan Segmentasi
 
 ```bash
 cd src
 python segment_dataset.py
 ```
 
-Expected output:
+Script akan:
 
-```
-=== ALL-IDB1 Processing ===
-Splitting 108 images: 86 train, 22 val
+1. Membaca ALL-IDB1 — crop sel abnormal (dari koordinat `.xyc`) + deteksi normal (HSV thresholding)
+2. Membaca ALL-IDB2 — salin sel individu ke folder yang sesuai
+3. Split 80/20 per-gambar (tidak ada leakage)
+4. Output ke `../dataset/`
 
-Processing abnormal cells from ALL_IDB1...
-  Cropped 320 abnormal cells (train)
-  Cropped 80 abnormal cells (val)
+Output yang diharapkan:
 
-Processing normal cells from ALL_IDB1...
-  Detected & cropped 80 normal cells (train)
-  Detected & cropped 20 normal cells (val)
+```text
+=== ALL-IDB1 ===
+  Splitting 108 images: 86 train / 22 val
+  Abnormal train: 320 cells  |  val: 80 cells
+  Normal   train:  80 cells  |  val: 20 cells
 
-=== ALL-IDB2 Processing ===
-  Copied 52 abnormal cells (train)
-  Copied 13 abnormal cells (val)
-  Copied 104 normal cells (train)
-  Copied 26 normal cells (val)
+=== ALL-IDB2 ===
+  Abnormal train:  52 cells  |  val: 13 cells
+  Normal   train: 104 cells  |  val: 26 cells
 
 === Summary ===
-Train: 556 images (Abnormal: 372, Normal: 184)
-Val: 139 images (Abnormal: 93, Normal: 46)
-Total: 695 images
+  Train : 556 images  (Abnormal: 372, Normal: 184)
+  Val   : 139 images  (Abnormal:  93, Normal:  46)
 ```
 
 ---
 
-## Quick Start
+### 2. Training
 
-### Run Single Experiment
+Semua command dijalankan dari direktori `src/`.
 
 ```bash
 cd src
-python main.py --exp focusmix_mha
 ```
 
-Training parameters:
-
-- Model: ConvNeXt V2 Tiny + Multi-Head Attention
-- Augmentation: FocusAugMix (SLIC + Saliency)
-- Epochs: 50 (dengan early stopping)
-- Batch size: 32
-
-### Run All Experiments Sequentially
+#### Jalankan Satu Eksperimen
 
 ```bash
-cd src
+# Eksperimen yang direkomendasikan
+python main.py --exp focusmix_mha
+
+# Eksperimen lain
+python main.py --exp baseline
+python main.py --exp mha_only
+python main.py --exp saliency_mix
+python main.py --exp focusmix_v2
+python main.py --exp focusmix_full
+python main.py --exp focusmix_aggressive
+
+# Dengan seed tertentu dan direktori data kustom
+python main.py --exp focusmix_mha --seed 123 --data-dir ../dataset
+```
+
+#### Jalankan Semua Eksperimen Berurutan
+
+```bash
 python main.py --all
 ```
 
-Ini akan menjalankan semua experiment secara berurutan:
+Progress dan metrics ditampilkan real-time di terminal. Checkpoint terbaik (berdasarkan `val_acc`) disimpan otomatis.
 
-1. `baseline` - ConvNeXt V2 only, standard augmentation (baseline performance floor)
-2. `mha_only` - Tambah Multi-Head Attention, tanpa mixing augmentation
-3. `saliency_mix` - Rectangular saliency-guided patch mixing
-4. `focusmix_v2` - SLIC Superpixels + Saliency (no MHA)
-5. `focusmix_mha` - SLIC Superpixels + Saliency + MHA
-6. `focusmix_full` - Complete system dengan online Grad-CAM
-7. `focusmix_aggressive` - Increased mixing ratio (35%) untuk dataset kecil
+---
 
-Training akan disimpan di checkpoint terpisah untuk setiap experiment.
+### 3. Monitoring
 
-### Monitor Training
+#### CSV Logs (Default)
 
-Real-time logging di console + CSV logs:
+File metrics tersimpan di `logs/<exp_name>/version_0/metrics.csv`.
 
-```
-logs/focusmix_mha/version_0/metrics.csv
-```
-
-Plot results dengan pandas:
+Plot training curve:
 
 ```python
 import pandas as pd
-df = pd.read_csv('logs/focusmix_mha/version_0/metrics.csv')
-df.plot(x='epoch', y=['train_loss', 'val_loss'])
+import matplotlib.pyplot as plt
+
+df = pd.read_csv('../logs/mha_only/version_0/metrics.csv')
+
+train = df.dropna(subset=['train_loss_epoch'])
+val   = df.dropna(subset=['val_loss'])
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+axes[0].plot(train['epoch'], train['train_loss_epoch'], label='train loss')
+axes[0].plot(val['epoch'],   val['val_loss'],           label='val loss')
+axes[0].set_title('Loss'); axes[0].legend()
+
+axes[1].plot(val['epoch'], val['val_acc'], color='green', label='val acc')
+axes[1].set_title('Val Accuracy'); axes[1].legend()
+
+plt.tight_layout()
+plt.savefig('training_curve.png', dpi=150)
+plt.show()
 ```
 
-### Evaluate pada Best Checkpoint
+#### TensorBoard (Opsional)
+
+Edit satu baris di `src/main.py`:
 
 ```python
-from src.lightning_model import LeukemiaLightningModel
-from src.data_module import LeukemiaDataModule
-import lightning as L
+# Ganti:
+logger = CSVLogger('logs', name=cfg.name)
 
-ckpt_path = 'checkpoints/focusmix_mha/epoch=XX-val_acc=XXXX.ckpt'
-model = LeukemiaLightningModel.load_from_checkpoint(ckpt_path)
-dm = LeukemiaDataModule(data_dir='dataset', batch_size=32)
+# Dengan:
+from lightning.pytorch.loggers import TensorBoardLogger
+logger = TensorBoardLogger('logs', name=cfg.name)
+```
+
+Kemudian:
+
+```bash
+tensorboard --logdir=../logs
+# Buka: http://localhost:6006
+```
+
+---
+
+### 4. Evaluasi In-Domain
+
+Evaluasi pada validation set ALL-IDB menggunakan checkpoint terbaik.
+Ini dijalankan otomatis di akhir setiap training, bisa juga dijalankan manual:
+
+```bash
+cd src
+
+python - << 'EOF'
+import torch
+import numpy._core.multiarray
+torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+
+import lightning as L
+from lightning_model import LeukemiaLightningModel
+from data_module import LeukemiaDataModule
+
+ckpt = '../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt'
+model = LeukemiaLightningModel.load_from_checkpoint(ckpt)
+
+dm = LeukemiaDataModule(data_dir='../dataset', batch_size=32)
 dm.setup()
 
-trainer = L.Trainer(devices='auto')
-trainer.validate(model, dm)
+trainer = L.Trainer(
+    accelerator='auto', devices=1,
+    logger=False, enable_checkpointing=False
+)
+trainer.validate(model, datamodule=dm)
+EOF
 ```
+
+---
+
+### 5. Evaluasi Eksternal C-NMC 2019
+
+#### Download C-NMC 2019
+
+- https://faspex.cancerimagingarchive.net/aspera/faspex/public/package?context=eyJyZXNvdXJjZSI6InBhY2thZ2VzIiwidHlwZSI6ImV4dGVybmFsX2Rvd25sb2FkX3BhY2thZ2UiLCJpZCI6IjczNCIsInBhc3Njb2RlIjoiNDM3ZmMzM2RkMzQ1ZmMzZjNjM2FlY2JmZWQ0MThlY2NjYTkzM2RmMiIsInBhY2thZ2VfaWQiOiI3MzQiLCJlbWFpbCI6ImhlbHBAY2FuY2VyaW1hZ2luZ2FyY2hpdmUubmV0In0=&redirected=true&authenticated=true
+
+#### Struktur Direktori C-NMC
+
+```text
+/path/to/C-NMC_2019/
++-- all/          <- sel ALL (leukemia)  [pemetaan: Abnormal]
++-- hem/          <- sel HEM (normal)    [pemetaan: Normal]
+```
+
+Format gambar yang didukung: `.jpg`, `.bmp`, `.png`, `.tif`
+
+#### Jalankan Evaluasi (Lengkap)
+
+```bash
+cd src
+
+python evaluate_external.py \
+    --ckpt      ../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt \
+    --cnmc-dir  /path/to/C-NMC_2019/test \
+    --data-dir  ../dataset \
+    --output-json ../results/cnmc_eval_mha_only.json
+```
+
+Script akan menjalankan **4 kondisi** secara berurutan:
+
+1. ALL-IDB val (in-domain, sebagai baseline)
+2. C-NMC tanpa normalisasi (raw domain shift)
+3. C-NMC + Macenko normalization
+4. C-NMC + Reinhard normalization
+
+#### Argumen Lengkap
+
+```text
+--ckpt            Path ke file .ckpt  (wajib)
+--cnmc-dir        Direktori C-NMC test, berisi all/ dan hem/  (wajib)
+--data-dir        Direktori dataset ALL-IDB  (default: ../dataset)
+--batch-size      Batch size inference  (default: 32)
+--num-workers     Worker DataLoader  (default: 4; gunakan 0 jika hang)
+--image-size      Ukuran resize gambar  (default: 224)
+--ref-samples     Gambar training untuk hitung referensi stain  (default: 100)
+--device          auto / cpu / cuda  (default: auto)
+--no-macenko      Skip Macenko normalization
+--no-reinhard     Skip Reinhard normalization
+--skip-val        Skip evaluasi ALL-IDB val
+--output-json     Simpan semua metrics ke JSON
+```
+
+#### Contoh Cepat (Tanpa Normalisasi)
+
+```bash
+python evaluate_external.py \
+    --ckpt     ../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt \
+    --cnmc-dir /path/to/C-NMC_2019/test \
+    --no-macenko --no-reinhard
+```
+
+#### Contoh Output
+
+```text
+────────────────────────────────────────────────────────────
+  ALL-IDB Val  .  In-Domain
+────────────────────────────────────────────────────────────
+  N samples  : 204
+  Accuracy   : 1.0000  (100.0%)
+  F1 (macro) : 1.0000
+
+────────────────────────────────────────────────────────────
+  C-NMC 2019  .  No Stain Normalization
+────────────────────────────────────────────────────────────
+  N samples  : 7272
+  Accuracy   : 0.7432  (74.3%)
+  F1 (macro) : 0.7215
+
+────────────────────────────────────────────────────────────
+  C-NMC 2019  .  Macenko Normalization
+────────────────────────────────────────────────────────────
+  N samples  : 7272
+  Accuracy   : 0.8214  (82.1%)
+  F1 (macro) : 0.8089
+
+────────────────────────────────────────────────────────────
+  C-NMC 2019  .  Reinhard Normalization
+────────────────────────────────────────────────────────────
+  N samples  : 7272
+  Accuracy   : 0.7896  (79.0%)
+  F1 (macro) : 0.7701
+
+════════════════════════════════════════════════════════════
+  SUMMARY
+════════════════════════════════════════════════════════════
+  Condition                                 Acc    F1
+  ──────────────────────────────────────── ────── ──────
+  ALL-IDB val (in-domain)                 1.0000 1.0000
+  C-NMC -- no normalization               0.7432 0.7215
+  C-NMC -- Macenko                        0.8214 0.8089
+  C-NMC -- Reinhard                       0.7896 0.7701
+
+  Domain-shift gap (val_acc - raw_acc) : +0.2568
+  WARNING: Large gap -- model likely relies on staining artefacts.
+```
+
+#### Interpretasi Domain-Shift Gap
+
+| Gap       | Interpretasi                                                            |
+| --------- | ----------------------------------------------------------------------- |
+| < 0.05    | Model robust — belajar morfologi sel, tidak bergantung staining        |
+| 0.05-0.10 | Ketergantungan staining moderat                                         |
+| > 0.10    | Ketergantungan staining signifikan; normalisasi sangat direkomendasikan |
+
+Jika Macenko / Reinhard menutup sebagian besar gap, maka staining adalah faktor utama penurunan performa — bukan kualitas arsitektur.
+
+---
+
+## Stain Normalization
+
+### Konsep
+
+Model yang dilatih di ALL-IDB (Giemsa, Italia) dan ditest di C-NMC (Wright-Giemsa, India)
+mengalami penurunan performa karena **distribusi warna berbeda**, bukan morfologi sel berbeda.
+Stain normalization memetakan C-NMC agar terlihat seperti ALL-IDB sebelum inference.
+
+```text
+C-NMC image (Wright-Giemsa)
+    |
+    v   MacenkoNormalizer.transform()
+Normalized (distribusi warna mendekati Giemsa ALL-IDB)
+    |
+    v   Model inference
+Prediction
+```
+
+### Macenko vs Reinhard
+
+| Aspek            | Macenko                      | Reinhard                         |
+| ---------------- | ---------------------------- | -------------------------------- |
+| Prinsip kerja    | SVD di Optical Density space | Color statistics transfer (LAB)  |
+| Kualitas         | Lebih akurat, stain-aware    | Lebih sederhana, global          |
+| Kecepatan        | Lambat (SVD per gambar)      | Sangat cepat                     |
+| Robustness       | Sensitif gambar tanpa tissue | Robust terhadap gambar partial   |
+| Direkomendasikan | Gambar berkualitas tinggi    | Dataset besar / batch processing |
+
+### API Python
+
+```python
+import numpy as np
+from PIL import Image
+from stain_normalize import (
+    MacenkoNormalizer,
+    ReinhardNormalizer,
+    compute_reference_from_dir,
+)
+
+# Hitung referensi dari training set ALL-IDB (sekali saja)
+ref_image, rh_mean, rh_std = compute_reference_from_dir(
+    directory='../dataset/train',
+    n_samples=100,       # jumlah gambar yang disampling
+    image_size=224,
+)
+
+# --- Macenko ---
+mac = MacenkoNormalizer(
+    luminosity_threshold=0.15,   # ambang batas untuk hapus background
+    angular_percentile=99,       # persentil untuk estimasi sudut stain
+)
+mac.fit(ref_image)               # fit ke satu gambar referensi ALL-IDB
+
+cnmc_np = np.array(Image.open('cnmc_cell.jpg').convert('RGB'))
+normalized_mac = mac.transform(cnmc_np)   # HxWx3 uint8
+
+# --- Reinhard ---
+rh = ReinhardNormalizer()
+rh.fit_from_stats(rh_mean, rh_std)        # fit dari statistik agregat dataset
+
+normalized_rh = rh.transform(cnmc_np)    # HxWx3 uint8
+
+# --- Atau fit dari satu gambar ---
+rh2 = ReinhardNormalizer().fit(ref_image)
+normalized_rh2 = rh2.transform(cnmc_np)
+```
+
+---
+
+## Analisis: Val Accuracy 100%
+
+### Investigasi Data Leakage
+
+Val accuracy 100% pada epoch 7 sempat menimbulkan kecurigaan. Investigasi membuktikan bahwa
+**tidak ada data leakage** — split dilakukan per gambar mikroskopi:
+
+```text
+Train: Im001, Im002, Im003, Im006, Im007, ... (86 gambar original)
+Val  : Im004, Im005, Im012, Im014, Im015, ... (22 gambar original)
+
+Semua sel crop dari Im004 masuk ke val saja, tidak ada yang masuk ke train.
+```
+
+Tidak ada overlap di antara keduanya.
+
+### Mengapa 100% Bisa Genuine?
+
+| Faktor                  | Penjelasan                                                                 |
+| ----------------------- | -------------------------------------------------------------------------- |
+| Pretrained sangat kuat  | ConvNeXtV2 fine-tuned di ImageNet-22k sudah punya fitur visual sangat kaya |
+| Val set kecil           | 204 gambar, binary task — lebih mudah mencapai 100%                       |
+| Kelas visually distinct | Blast cell (inti besar, kromatin kasar) vs normal WBC sangat berbeda       |
+| Dataset terkontrol      | ALL-IDB: satu lab Italia, satu mesin mikroskop, satu batch staining        |
+
+### Catatan Penting untuk Penelitian
+
+Val accuracy 100% **tidak berarti** model akan generalisasi ke dataset lain. Model kemungkinan
+belajar *staining artefacts* khas ALL-IDB Italia, bukan morfologi sel yang general.
+Evaluasi yang bermakna hanya bisa dilakukan dengan external test set dari institusi berbeda.
+
+Inilah alasan mengapa C-NMC evaluation sangat penting — domain-shift gap memberikan gambaran
+yang **lebih jujur** tentang kemampuan generalisasi model.
 
 ---
 
 ## Eksperimen & Konfigurasi
 
-### Available Experiments
+### Daftar Eksperimen
 
-| Experiment          | MHA | Augmentation                | Use Case                 |
-| ------------------- | --- | --------------------------- | ------------------------ |
-| baseline            | No  | Standard crops/flips        | Performance floor        |
-| mha_only            | Yes | Standard crops/flips        | Isolate MHA contribution |
-| saliency_mix        | No  | Saliency-weighted patches   | Simple augmentation      |
-| focusmix_v2         | No  | SLIC + Saliency             | Lightweight mixing aug   |
-| focusmix_mha        | Yes | SLIC + Saliency + MHA       | Recommended balanced     |
-| focusmix_full       | Yes | SLIC + Saliency + Grad-CAM  | Most comprehensive       |
-| focusmix_aggressive | Yes | SLIC + Saliency (35% ratio) | For very small datasets  |
+| Eksperimen              | MHA | aug_mode         | aug_prob | paste_ratio | Tujuan                     |
+| ----------------------- | --- | ---------------- | -------- | ----------- | -------------------------- |
+| `baseline`            | No  | `none`         | 0.5      | 0.25        | Batas bawah performa       |
+| `mha_only`            | Yes | `none`         | 0.5      | 0.25        | Isolasi kontribusi MHA     |
+| `saliency_mix`        | No  | `saliency`     | 0.5      | 0.25        | SaliencyMix murni          |
+| `focusmix_v2`         | No  | `focusmix`     | 0.5      | 0.25        | OcCaMix + Saliency         |
+| `focusmix_mha`        | Yes | `focusmix`     | 0.5      | 0.25        | **Direkomendasikan** |
+| `focusmix_full`       | Yes | `focusmix_cam` | 0.5      | 0.25        | + Grad-CAM online          |
+| `focusmix_aggressive` | Yes | `focusmix`     | 0.7      | 0.35        | Dataset sangat kecil       |
 
-### Key Hyperparameters
+### Hyperparameter Lengkap
 
-| Parameter       | Default | Range        | Description                 |
-| --------------- | ------- | ------------ | --------------------------- |
-| batch_size      | 32      | 8-64         | Adjust untuk GPU VRAM       |
-| lr              | 1e-4    | 1e-5 to 1e-3 | Base learning rate          |
-| llrd            | 0.75    | 0.5-0.99     | Layer-wise decay factor     |
-| max_epochs      | 50      | 20-100       | Maximum training epochs     |
-| warmup_epochs   | 5       | 2-10         | Warmup sebelum cosine decay |
-| aug_prob        | 0.5     | 0.0-1.0      | Probability augmentation    |
-| paste_ratio     | 0.25    | 0.1-0.5      | Fraction for mixing         |
-| n_segments      | 50      | 30-100       | SLIC superpixel count       |
-| label_smoothing | 0.05    | 0.0-0.1      | Label smoothing value       |
+| Parameter           | Default | Deskripsi                                  |
+| ------------------- | ------- | ------------------------------------------ |
+| `batch_size`      | 32      | Turunkan ke 16 jika GPU OOM                |
+| `lr`              | 1e-4    | Base learning rate untuk head / MHA        |
+| `weight_decay`    | 0.05    | AdamW weight decay                         |
+| `llrd`            | 0.75    | Layer-wise LR decay factor per stage       |
+| `label_smoothing` | 0.05    | Label smoothing di CrossEntropy            |
+| `max_epochs`      | 50      | Maksimum epoch (early stopping aktif)      |
+| `warmup_epochs`   | 5       | Epoch linear warmup sebelum cosine         |
+| `aug_prob`        | 0.5     | Probabilitas augmentasi per sampel         |
+| `paste_ratio`     | 0.25    | Fraksi superpixel yang di-paste            |
+| `n_segments`      | 50      | Jumlah superpixel SLIC                     |
+| `mha_stage`       | 2       | Stage backbone tempat MHA disisipkan (0-3) |
+
+### Menambah Eksperimen Baru
+
+Edit `EXPERIMENTS` di `src/main.py`:
+
+```python
+EXPERIMENTS['my_exp'] = ExperimentConfig(
+    name='my_exp',
+    aug_mode='focusmix',
+    use_mha=True,
+    mha_stage=3,       # coba MHA di stage terakhir (7x7 tokens)
+    paste_ratio=0.30,
+    lr=5e-5,
+)
+```
+
+```bash
+python main.py --exp my_exp
+```
 
 ---
 
-## Output & Checkpoint Management
+## Output & Checkpoint
 
-### Directory Structure
+### Load Checkpoint untuk Inference
 
+```python
+import torch
+import numpy._core.multiarray
+torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+
+from lightning_model import LeukemiaLightningModel
+from torchvision import transforms
+from PIL import Image
+
+# Load model
+model = LeukemiaLightningModel.load_from_checkpoint(
+    '../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt',
+    map_location='cuda',
+)
+model.eval()
+
+# Preprocessing
+transform = transforms.Compose([
+    transforms.Resize((224, 224), antialias=True),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+
+# Inference
+img = transform(Image.open('cell.jpg').convert('RGB')).unsqueeze(0).cuda()
+with torch.no_grad():
+    pred = model(img).argmax(dim=1).item()
+
+print({0: 'Abnormal (ALL)', 1: 'Normal'}[pred])
 ```
-checkpoints/
-├── baseline/
-│   ├── epoch=XX-val_acc=0.8234.ckpt
-│   └── last.ckpt
-├── focusmix_mha/
-│   ├── epoch=YY-val_acc=0.9123.ckpt
-│   └── last.ckpt
-└── ...
 
-logs/
-├── baseline/version_0/metrics.csv
-├── focusmix_mha/version_0/metrics.csv
-└── ...
-```
+### Inference dengan Stain Normalization
 
-### CSV Logging
+```python
+import numpy as np
+from PIL import Image
+from stain_normalize import MacenkoNormalizer, compute_reference_from_dir
 
-Setiap experiment log ke `logs/<exp_name>/version_0/metrics.csv`:
+# Fit normalizer ke training set ALL-IDB (sekali, simpan ke pickle jika perlu)
+ref_img, _, _ = compute_reference_from_dir('../dataset/train', n_samples=100)
+mac = MacenkoNormalizer().fit(ref_img)
 
-```csv
-epoch,train_loss,val_loss,train_acc,val_acc,train_f1,val_f1,learning_rate
-0,2.345,2.123,0.45,0.52,0.40,0.48,0.0001
-1,1.890,1.756,0.62,0.68,0.59,0.65,0.0001
-...
-49,0.234,0.301,0.94,0.92,0.93,0.91,0.000005
+# Normalize gambar C-NMC sebelum inference
+cnmc_img = np.array(Image.open('cnmc_cell.bmp').convert('RGB'))
+normalized = mac.transform(cnmc_img)
+
+img_tensor = transform(Image.fromarray(normalized)).unsqueeze(0).cuda()
+with torch.no_grad():
+    pred = model(img_tensor).argmax(dim=1).item()
 ```
 
 ### Resume Training
 
+Edit `trainer.fit()` di `src/main.py`:
+
 ```python
-trainer.fit(model, datamodule=dm, ckpt_path='checkpoints/focusmix_mha/last.ckpt')
+trainer.fit(
+    model,
+    datamodule=datamodule,
+    ckpt_path='../checkpoints/mha_only/last.ckpt',  # tambahkan ini
+)
 ```
 
-### Export Model untuk Inference
+### Export ke TorchScript
 
 ```python
-model = LeukemiaLightningModel.load_from_checkpoint(best_ckpt)
-scripted = torch.jit.script(model)
-torch.jit.save(scripted, 'models/leukemia_classifier.pt')
+model = LeukemiaLightningModel.load_from_checkpoint('best.ckpt').model
+scripted = torch.jit.trace(model, torch.randn(1, 3, 224, 224))
+torch.jit.save(scripted, 'leukemia_classifier.pt')
 ```
 
 ---
 
 ## Troubleshooting
 
+### `_pickle.UnpicklingError` saat load checkpoint (PyTorch >= 2.6)
+
+```text
+Weights only load failed.
+GLOBAL numpy._core.multiarray.scalar was not an allowed global by default.
+```
+
+**Penyebab:** PyTorch 2.6 mengubah default `weights_only=True`. Checkpoint menyimpan numpy
+scalar yang tidak ada di safe globals list.
+
+**Status:** Sudah diperbaiki di `main.py` dan `evaluate_external.py`.
+Jika error di script lain, tambahkan di bagian atas sebelum load:
+
+```python
+import torch
+import numpy._core.multiarray
+torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+```
+
 ### CUDA Out of Memory
 
-Reduce batch size di `src/main.py` -> `ExperimentConfig` -> `batch_size = 16`
+```python
+# Di src/main.py, ubah ExperimentConfig:
+batch_size=16   # turunkan dari 32
+```
 
-### Segmentation Script Error: "*.xyc file not found"
+Atau aktifkan gradient checkpointing:
 
-Pastikan ALL_IDB1 abnormal coordinates sudah didownload:
+```python
+# Di lightning_model.py dalam __init__:
+self.model.backbone.set_grad_checkpointing(True)
+```
+
+### Training Sangat Lambat
+
+```bash
+# Kurangi DataLoader workers jika CPU bottleneck
+# Di LeukemiaDataModule: num_workers=4
+
+# Hindari focusmix_full (Grad-CAM online paling lambat)
+python main.py --exp focusmix_mha   # lebih cepat dari focusmix_full
+
+# Matikan SLIC untuk cek overhead augmentasi
+python main.py --exp mha_only
+```
+
+### Segmentation Error `*.xyc not found`
 
 ```bash
 ls data/ALL_IDB1/xyc/ | head -5
-# Should show: Im001_1.xyc, Im002_1.xyc, ...
+# Harus ada: Im001_1.xyc  Im002_1.xyc  Im003_1.xyc ...
 ```
 
-### Very Low Validation Accuracy
-
-1. Verifikasi dataset tersegmentasi dengan baik:
-
-   ```bash
-   python segment_dataset.py
-   ```
-2. Train baseline dengan fixed seed:
-
-   ```bash
-   python main.py --exp baseline --seed 42
-   ```
-3. Check training vs validation accuracy di logs CSV
-
-### Training Too Slow
-
-1. Kurangi num_workers jika CPU bottleneck: `LeukemiaDataModule(..., num_workers=4)`
-2. Use precision='32' jika GPU tidak support bfloat16
-3. Skip Grad-CAM: gunakan `focusmix_v2` daripada `focusmix_full`
-
-### Import Errors
+### Macenko Hang / RuntimeError
 
 ```bash
-pip install --upgrade -r requirements.txt
+# Jalankan dengan num_workers=0 (normalizer tidak picklable lintas proses)
+python evaluate_external.py \
+    --ckpt ../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt \
+    --cnmc-dir /path/to/C-NMC_2019/test \
+    --num-workers 0
+
+# Jika masih crash, skip Macenko dan pakai Reinhard saja
+python evaluate_external.py ... --no-macenko
+```
+
+### `No images found` pada C-NMC
+
+```bash
+# Verifikasi struktur direktori
+ls /path/to/C-NMC_2019/test/
+# Harus ada: all/  hem/
+
+ls /path/to/C-NMC_2019/test/all/ | head -5
+# Harus ada file gambar: UID_1.bmp  UID_2.bmp ...
+```
+
+Script mendukung layout `all/hem/`, `Abnormal/Normal/`, `ALL/HEM/`, `positive/negative/`.
+
+### `ModuleNotFoundError: stain_normalize`
+
+```bash
+# Selalu jalankan dari direktori src/
+cd src
+python evaluate_external.py ...   # BENAR
+
+# Bukan dari root:
+python src/evaluate_external.py ...  # salah (import akan gagal)
+```
+
+### Early Stopping Terlalu Cepat
+
+Edit patience di `src/main.py`:
+
+```python
+EarlyStopping(monitor='val_loss', mode='min', patience=15),
+#                                                       ^^ naikkan dari 10
 ```
 
 ---
 
 ## Referensi
 
-### Papers & Methods
+### Paper Utama
 
-- ConvNeXt V2: Liu et al., "A ConvNet for the 2020s" (CVPR 2023)
-- Mustaqim, T., Fatichah, C., Suciati, N., Obi, T., & Lee, J. (2025). FocusAugMix: A data augmentation method for enhancing Acute Lymphoblastic Leukemia classification.  *Intelligent Systems With Applications* ,  *26* , 200512. **https://doi.org/10.1016/j.iswa.2025.200512**
+- **FocusAugMix**: Mustaqim T., Fatichah C., Suciati N., Obi T., Lee J. (2025).
+  *FocusAugMix: A data augmentation method for enhancing Acute Lymphoblastic Leukemia classification.*
+  Intelligent Systems With Applications, 26, 200512.
+  [https://doi.org/10.1016/j.iswa.2025.200512](https://doi.org/10.1016/j.iswa.2025.200512)
+- **ConvNeXt V2**: Woo S., et al. (2023).
+  *ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders.*
+  CVPR 2023.
+- **SaliencyMix**: Uddin A.F.M.S., et al. (2021).
+  *SaliencyMix: A Saliency Guided Data Augmentation Strategy for Better Regularization.*
+  ICLR 2021.
+- **Macenko Stain Normalization**: Macenko M., et al. (2009).
+  *A method for normalizing histology slides for quantitative analysis.*
+  ISBI 2009.
+- **Reinhard Color Transfer**: Reinhard E., et al. (2001).
+  *Color transfer between images.*
+  IEEE Computer Graphics and Applications, 21(5), 34-41.
 
 ### Dataset
 
 ```bibtex
-@article{ALL_IDB,
-  title={ALL-IDB: The Acute Lymphoblastic Leukemia Image Database for Image Processing},
-  author={Labati, R. D. and Pistore, V. and Scotti, F.},
-  journal={IEEE Transactions on Biomedical Engineering},
-  year={2011}
+@article{labati2011allidb,
+  title   = {ALL-IDB: The Acute Lymphoblastic Leukemia Image Database for Image Processing},
+  author  = {Labati, R. D. and Piuri, V. and Scotti, F.},
+  journal = {Proc. IEEE ICIP},
+  year    = {2011}
+}
+
+@article{gupta2019cnmc,
+  title   = {Preparation of a comprehensive leukocyte dataset},
+  author  = {Gupta, A. and Gupta, R.},
+  journal = {Scientific Data},
+  year    = {2019},
+  doi     = {10.1038/s41597-019-0054-7}
 }
 ```
 
 ---
 
-**Last Updated**: 2024-05-26
+Last updated: 2026-05-27

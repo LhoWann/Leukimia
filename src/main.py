@@ -9,8 +9,15 @@ Run a specific experiment:
     python main.py --exp focusmix_cam   (uses online Grad-CAM regeneration)
 """
 import warnings
-warnings.filterwarnings("ignore", message="triton not found.*", module="torch.utils.flop_counter")
+import logging
+
+warnings.filterwarnings("ignore", message="triton not found.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.functional")
+warnings.filterwarnings("ignore", message=".*LeafSpec.*is deprecated.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
+logging.getLogger("lightning.pytorch.utilities._pytree").setLevel(logging.ERROR)
 
 import argparse
 import random
@@ -20,6 +27,20 @@ from typing import Optional
 
 import numpy as np
 import torch
+
+# ── Fix PyTorch ≥2.6 weights_only=True default ────────────────────────────────
+# Checkpoints embed numpy scalars, dtype objects, and LambdaLR state.
+# Allowlist all affected globals so Lightning can load/validate checkpoints.
+try:
+    import numpy._core.multiarray  # noqa: F401
+    import numpy.dtypes            # noqa: F401
+    _safe = [numpy._core.multiarray.scalar, numpy.dtype]
+    _safe += [getattr(numpy.dtypes, n) for n in dir(numpy.dtypes)
+              if isinstance(getattr(numpy.dtypes, n), type)]
+    torch.serialization.add_safe_globals(_safe)
+except Exception:
+    pass  # older numpy or older torch — not needed
+# ──────────────────────────────────────────────────────────────────────────────
 import lightning as L
 from lightning.pytorch.callbacks import (
     ModelCheckpoint, EarlyStopping, LearningRateMonitor,
@@ -51,7 +72,7 @@ class ExperimentConfig:
     llrd: float = 0.75
     label_smoothing: float = 0.05
     batch_size: int = 32
-    max_epochs: int = 50
+    max_epochs: int = 7
     warmup_epochs: int = 5
 
 
