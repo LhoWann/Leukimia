@@ -23,6 +23,7 @@ lintas-domain.
   - [5. Evaluasi Eksternal C-NMC 2019](#5-evaluasi-eksternal-c-nmc-2019)
 - [Stain Normalization](#stain-normalization)
 - [Analisis: Val Accuracy 100%](#analisis-val-accuracy-100)
+- [Hasil Eksperimen Nyata](#hasil-eksperimen-nyata)
 - [Eksperimen &amp; Konfigurasi](#eksperimen--konfigurasi)
 - [Output &amp; Checkpoint](#output--checkpoint)
 - [Troubleshooting](#troubleshooting)
@@ -127,6 +128,21 @@ AdaptiveAvgPool2d(1) -> Flatten -> Dropout(0.3) -> Linear(num_classes)
 
 **Optimizer:** AdamW + Linear Warmup (5 epoch) + Cosine Decay
 
+**Trainer settings:**
+
+| Setting             | Nilai         | Keterangan                                   |
+| ------------------- | ------------- | -------------------------------------------- |
+| `precision`       | `bf16-mixed`  | ~1.8x speedup pada GPU Ampere+               |
+| `gradient_clip_val` | 1.0         | Mencegah exploding gradient saat fine-tuning |
+| `log_every_n_steps` | 10          | Frekuensi logging ke CSV                     |
+
+**Class index mapping** (ditentukan oleh urutan alfabet folder ImageFolder):
+
+| Index | Nama folder | Label biologis          |
+| ----- | ----------- | ----------------------- |
+| 0     | `Abnormal`  | Sel ALL / blast cell    |
+| 1     | `Normal`    | Sel WBC normal          |
+
 ---
 
 ## Struktur Proyek
@@ -166,7 +182,7 @@ LEUKIMIA/
 |   +-- baseline/version_0/metrics.csv
 |   +-- mha_only/version_0/metrics.csv
 |
-+-- results/                    # JSON output evaluasi eksternal
++-- result/                     # JSON output evaluasi eksternal
 +-- requirements.txt
 +-- README.md
 ```
@@ -208,6 +224,7 @@ conda activate leukemia
 
 ```bash
 pip install -r requirements.txt
+pip install torchmetrics>=1.0.0   # tidak tercantum di requirements.txt, diperlukan oleh lightning_model.py
 ```
 
 Untuk CUDA support (jika PyTorch terinstall tanpa CUDA):
@@ -317,6 +334,19 @@ Progress dan metrics ditampilkan real-time di terminal. Checkpoint terbaik (berd
 #### CSV Logs (Default)
 
 File metrics tersimpan di `logs/<exp_name>/version_0/metrics.csv`.
+
+Kolom yang tersedia di CSV:
+
+| Kolom             | Keterangan                         |
+| ----------------- | ---------------------------------- |
+| `train_loss`      | Loss per step                      |
+| `train_loss_epoch`| Loss rata-rata per epoch           |
+| `val_loss`        | Validation loss                    |
+| `val_acc`         | Validation accuracy                |
+| `val_f1`          | F1 macro                           |
+| `val_precision`   | Precision macro                    |
+| `val_recall`      | Recall macro                       |
+| `lr-AdamW`        | Learning rate head/MHA per epoch   |
 
 Plot training curve:
 
@@ -461,6 +491,8 @@ python evaluate_external.py \
 
 #### Contoh Output
 
+Output berikut adalah hasil nyata dari eksperimen `baseline` (lihat juga [Hasil Eksperimen Nyata](#hasil-eksperimen-nyata)):
+
 ```text
 ────────────────────────────────────────────────────────────
   ALL-IDB Val  .  In-Domain
@@ -472,23 +504,23 @@ python evaluate_external.py \
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  No Stain Normalization
 ────────────────────────────────────────────────────────────
-  N samples  : 7272
-  Accuracy   : 0.7432  (74.3%)
-  F1 (macro) : 0.7215
+  N samples  : 3527
+  Accuracy   : 0.6813  (68.1%)
+  F1 (macro) : 0.4494
 
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  Macenko Normalization
 ────────────────────────────────────────────────────────────
-  N samples  : 7272
-  Accuracy   : 0.8214  (82.1%)
-  F1 (macro) : 0.8089
+  N samples  : 3527
+  Accuracy   : 0.6833  (68.3%)
+  F1 (macro) : 0.5805
 
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  Reinhard Normalization
 ────────────────────────────────────────────────────────────
-  N samples  : 7272
-  Accuracy   : 0.7896  (79.0%)
-  F1 (macro) : 0.7701
+  N samples  : 3527
+  Accuracy   : 0.6765  (67.6%)
+  F1 (macro) : 0.4221
 
 ════════════════════════════════════════════════════════════
   SUMMARY
@@ -496,11 +528,11 @@ python evaluate_external.py \
   Condition                                 Acc    F1
   ──────────────────────────────────────── ────── ──────
   ALL-IDB val (in-domain)                 1.0000 1.0000
-  C-NMC -- no normalization               0.7432 0.7215
-  C-NMC -- Macenko                        0.8214 0.8089
-  C-NMC -- Reinhard                       0.7896 0.7701
+  C-NMC -- no normalization               0.6813 0.4494
+  C-NMC -- Macenko                        0.6833 0.5805
+  C-NMC -- Reinhard                       0.6765 0.4221
 
-  Domain-shift gap (val_acc - raw_acc) : +0.2568
+  Domain-shift gap (val_acc - raw_acc) : +0.3187
   WARNING: Large gap -- model likely relies on staining artefacts.
 ```
 
@@ -621,6 +653,55 @@ yang **lebih jujur** tentang kemampuan generalisasi model.
 
 ---
 
+## Hasil Eksperimen Nyata
+
+Hasil evaluasi tersimpan di `result/` (format JSON). C-NMC 2019 test set yang digunakan
+berisi **3.527 sel** (subset dari keseluruhan dataset).
+
+### Baseline — ConvNeXtV2-Tiny, tanpa MHA, tanpa mixing aug
+
+| Kondisi                  | Acc    | F1 Macro | F1 Weighted | Precision | Recall |
+| ------------------------ | ------ | -------- | ----------- | --------- | ------ |
+| ALL-IDB val (in-domain)  | 1.0000 | 1.0000   | 1.0000      | 1.0000    | 1.0000 |
+| C-NMC tanpa normalisasi  | 0.6813 | 0.4494   | 0.5778      | 0.6070    | 0.5146 |
+| C-NMC + Macenko          | 0.6833 | 0.5805   | 0.6551      | 0.6163    | 0.5804 |
+| C-NMC + Reinhard         | 0.6765 | 0.4221   | 0.5599      | 0.5422    | 0.5031 |
+| **Domain-shift gap**     | **0.319** | —     | —           | —         | —      |
+
+Confusion matrix in-domain (kelas: `[Abnormal, Normal]`):
+
+```
+[[111,   0],   ← 111 Abnormal terklasifikasi benar, 0 salah klasifikasi
+ [  0,  93]]   ← 93 Normal terklasifikasi benar, 0 salah klasifikasi
+```
+
+### FocusAugMix Aggressive — MHA + aug_prob=0.7, paste_ratio=0.35
+
+| Kondisi                  | Acc    | F1 Macro | F1 Weighted | Precision | Recall |
+| ------------------------ | ------ | -------- | ----------- | --------- | ------ |
+| ALL-IDB val (in-domain)  | 0.9951 | 0.9951   | 0.9951      | 0.9955    | 0.9946 |
+| C-NMC tanpa normalisasi  | 0.5186 | 0.5165   | 0.5053      | 0.6399    | 0.6222 |
+| C-NMC + Macenko          | 0.3564 | 0.3178   | 0.2595      | 0.5210    | 0.5073 |
+| C-NMC + Reinhard         | 0.4897 | 0.4877   | 0.4762      | 0.5998    | 0.5878 |
+| **Domain-shift gap**     | **0.477** | —     | —           | —         | —      |
+
+**Temuan kunci:** Augmentasi agresif (`aug_prob=0.7`, `paste_ratio=0.35`) pada dataset yang
+sangat kecil justru memperbesar domain-shift gap (0.477 vs 0.319 baseline). Model sepertinya
+belajar memadupadankan artefak staining ALL-IDB secara lebih agresif, bukan morfologi sel yang
+generalisable. Untuk dataset skala ini, `focusmix_mha` dengan parameter default lebih disarankan.
+
+### Ringkasan Perbandingan Lintas-Domain
+
+| Eksperimen              | Val Acc (in-domain) | CNMC Acc (no norm) | Gap    |
+| ----------------------- | ------------------- | ------------------ | ------ |
+| `baseline`            | 1.0000              | 0.6813             | 0.319  |
+| `focusmix_aggressive` | 0.9951              | 0.5186             | 0.477  |
+
+> Hasil untuk `focusmix_mha`, `mha_only`, `saliency_mix`, `focusmix_v2`, dan `focusmix_full`
+> belum tersedia di `result/` — jalankan `evaluate_external.py` untuk menghasilkannya.
+
+---
+
 ## Eksperimen & Konfigurasi
 
 ### Daftar Eksperimen
@@ -644,7 +725,7 @@ yang **lebih jujur** tentang kemampuan generalisasi model.
 | `weight_decay`    | 0.05    | AdamW weight decay                         |
 | `llrd`            | 0.75    | Layer-wise LR decay factor per stage       |
 | `label_smoothing` | 0.05    | Label smoothing di CrossEntropy            |
-| `max_epochs`      | 50      | Maksimum epoch (early stopping aktif)      |
+| `max_epochs`      | 7       | Maksimum epoch (early stopping aktif; cukup karena fine-tuning pretrained) |
 | `warmup_epochs`   | 5       | Epoch linear warmup sebelum cosine         |
 | `aug_prob`        | 0.5     | Probabilitas augmentasi per sampel         |
 | `paste_ratio`     | 0.25    | Fraksi superpixel yang di-paste            |
@@ -788,7 +869,7 @@ self.model.backbone.set_grad_checkpointing(True)
 
 ```bash
 # Kurangi DataLoader workers jika CPU bottleneck
-# Di LeukemiaDataModule: num_workers=4
+# Di LeukemiaDataModule: num_workers=8 (default)
 
 # Hindari focusmix_full (Grad-CAM online paling lambat)
 python main.py --exp focusmix_mha   # lebih cepat dari focusmix_full
@@ -894,4 +975,4 @@ EarlyStopping(monitor='val_loss', mode='min', patience=15),
 
 ---
 
-Last updated: 2026-05-27
+Last updated: 2026-05-28
