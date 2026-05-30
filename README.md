@@ -434,22 +434,41 @@ EOF
 
 #### Struktur Direktori C-NMC
 
+Gunakan `C-NMC_train_merged` — satu-satunya split yang memiliki label kelas publik.
+Split test (prelim & final) berisi file flat tanpa label sehingga tidak dapat dievaluasi.
+
 ```text
-/path/to/C-NMC_2019/
-+-- all/          <- sel ALL (leukemia)  [pemetaan: Abnormal]
-+-- hem/          <- sel HEM (normal)    [pemetaan: Normal]
+PKG_C_NMC 2019/
++-- C-NMC_train_merged/
+|   +-- all/          <- sel ALL (leukemia)  [pemetaan: Abnormal]
+|   +-- hem/          <- sel HEM (normal)    [pemetaan: Normal]
++-- C-NMC_training_data/
+|   +-- fold_0/all/ hem/
+|   +-- fold_1/all/ hem/
+|   +-- fold_2/all/ hem/
++-- C-NMC_test_prelim_phase_data/   <- flat files, tanpa label (tidak bisa dievaluasi)
++-- C-NMC_test_final_phase_data/    <- flat files, tanpa label (tidak bisa dievaluasi)
 ```
 
 Format gambar yang didukung: `.jpg`, `.bmp`, `.png`, `.tif`
 
-#### Jalankan Evaluasi (Lengkap)
+#### Jalankan Evaluasi — Auto Mode (semua eksperimen sekaligus)
+
+```bash
+# dari root direktori proyek
+python src/evaluate_external.py \
+    --cnmc-dir "PKG_C_NMC 2019/C-NMC_train_merged" \
+    --data-dir dataset
+```
+
+#### Jalankan Evaluasi — Single Model
 
 ```bash
 cd src
 
 python evaluate_external.py \
-    --ckpt      ../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt \
-    --cnmc-dir  /path/to/C-NMC_2019/test \
+    --ckpt      ../checkpoints/mha_only/epoch=07-val_f1=1.0000.ckpt \
+    --cnmc-dir  "../PKG_C_NMC 2019/C-NMC_train_merged" \
     --data-dir  ../dataset \
     --output-json ../results/cnmc_eval_mha_only.json
 ```
@@ -465,7 +484,7 @@ Script akan menjalankan **4 kondisi** secara berurutan:
 
 ```text
 --ckpt            Path ke file .ckpt  (wajib)
---cnmc-dir        Direktori C-NMC test, berisi all/ dan hem/  (wajib)
+--cnmc-dir        Direktori C-NMC berlabel, berisi all/ dan hem/  (wajib)
 --data-dir        Direktori dataset ALL-IDB  (default: ../dataset)
 --batch-size      Batch size inference  (default: 32)
 --num-workers     Worker DataLoader  (default: 4; gunakan 0 jika hang)
@@ -481,15 +500,18 @@ Script akan menjalankan **4 kondisi** secara berurutan:
 #### Contoh Cepat (Tanpa Normalisasi)
 
 ```bash
+cd src
+
 python evaluate_external.py \
-    --ckpt     ../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt \
-    --cnmc-dir /path/to/C-NMC_2019/test \
+    --ckpt     ../checkpoints/mha_only/epoch=07-val_f1=1.0000.ckpt \
+    --cnmc-dir "../PKG_C_NMC 2019/C-NMC_train_merged" \
     --no-macenko --no-reinhard
 ```
 
 #### Contoh Output
 
-Output berikut adalah hasil nyata dari eksperimen `baseline` (lihat juga [Hasil Eksperimen Nyata](#hasil-eksperimen-nyata)):
+Output berikut adalah hasil nyata dari eksperimen `baseline` pada `C-NMC_train_merged`
+(10.661 sel). Lihat analisis lengkap di [experiment_results.md](experiment_results.md).
 
 ```text
 ────────────────────────────────────────────────────────────
@@ -502,23 +524,23 @@ Output berikut adalah hasil nyata dari eksperimen `baseline` (lihat juga [Hasil 
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  No Stain Normalization
 ────────────────────────────────────────────────────────────
-  N samples  : 3527
-  Accuracy   : 0.6813  (68.1%)
-  F1 (macro) : 0.4494
+  N samples  : 10661
+  Accuracy   : 0.6904  (69.0%)
+  F1 (macro) : 0.5289
 
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  Macenko Normalization
 ────────────────────────────────────────────────────────────
-  N samples  : 3527
-  Accuracy   : 0.6833  (68.3%)
-  F1 (macro) : 0.5805
+  N samples  : 10661
+  Accuracy   : 0.6537  (65.4%)
+  F1 (macro) : 0.4864
 
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  Reinhard Normalization
 ────────────────────────────────────────────────────────────
-  N samples  : 3527
-  Accuracy   : 0.6765  (67.6%)
-  F1 (macro) : 0.4221
+  N samples  : 10661
+  Accuracy   : 0.7035  (70.4%)
+  F1 (macro) : 0.5101
 
 ════════════════════════════════════════════════════════════
   SUMMARY
@@ -526,11 +548,11 @@ Output berikut adalah hasil nyata dari eksperimen `baseline` (lihat juga [Hasil 
   Condition                                 Acc    F1
   ──────────────────────────────────────── ────── ──────
   ALL-IDB val (in-domain)                 1.0000 1.0000
-  C-NMC -- no normalization               0.6813 0.4494
-  C-NMC -- Macenko                        0.6833 0.5805
-  C-NMC -- Reinhard                       0.6765 0.4221
+  C-NMC -- no normalization               0.6904 0.5289
+  C-NMC -- Macenko                        0.6537 0.4864
+  C-NMC -- Reinhard                       0.7035 0.5101
 
-  Domain-shift gap (val_acc - raw_acc) : +0.3187
+  Domain-shift gap (val_acc - raw_acc) : +0.3096
   WARNING: Large gap -- model likely relies on staining artefacts.
 ```
 
@@ -808,8 +830,8 @@ ls data/ALL_IDB1/xyc/ | head -5
 ```bash
 # Jalankan dengan num_workers=0 (normalizer tidak picklable lintas proses)
 python evaluate_external.py \
-    --ckpt ../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt \
-    --cnmc-dir /path/to/C-NMC_2019/test \
+    --ckpt ../checkpoints/mha_only/epoch=07-val_f1=1.0000.ckpt \
+    --cnmc-dir "../PKG_C_NMC 2019/C-NMC_train_merged" \
     --num-workers 0
 
 # Jika masih crash, skip Macenko dan pakai Reinhard saja
@@ -818,13 +840,17 @@ python evaluate_external.py ... --no-macenko
 
 ### `No images found` pada C-NMC
 
-```bash
-# Verifikasi struktur direktori
-ls /path/to/C-NMC_2019/test/
-# Harus ada: all/  hem/
+Penyebab paling umum: menggunakan split test (prelim/final) yang berisi flat files tanpa
+subdirektori kelas. Gunakan `C-NMC_train_merged` atau salah satu fold di `C-NMC_training_data`.
 
-ls /path/to/C-NMC_2019/test/all/ | head -5
-# Harus ada file gambar: UID_1.bmp  UID_2.bmp ...
+```bash
+# Benar — ada subdirektori all/ dan hem/
+ls "PKG_C_NMC 2019/C-NMC_train_merged/"
+# Output: all/  hem/
+
+# Salah — flat files tanpa label
+ls "PKG_C_NMC 2019/C-NMC_test_prelim_phase_data/"
+# Output: 1.bmp  2.bmp  3.bmp  ...  (tidak bisa dievaluasi)
 ```
 
 Script mendukung layout `all/hem/`, `Abnormal/Normal/`, `ALL/HEM/`, `positive/negative/`.
