@@ -22,8 +22,6 @@ lintas-domain.
   - [4. Evaluasi In-Domain](#4-evaluasi-in-domain)
   - [5. Evaluasi Eksternal C-NMC 2019](#5-evaluasi-eksternal-c-nmc-2019)
 - [Stain Normalization](#stain-normalization)
-- [Analisis: Val Accuracy 100%](#analisis-val-accuracy-100)
-- [Hasil Eksperimen Nyata](#hasil-eksperimen-nyata)
 - [Eksperimen &amp; Konfigurasi](#eksperimen--konfigurasi)
 - [Output &amp; Checkpoint](#output--checkpoint)
 - [Troubleshooting](#troubleshooting)
@@ -617,88 +615,8 @@ normalized_rh2 = rh2.transform(cnmc_np)
 
 ---
 
-## Analisis: Val Accuracy 100%
-
-### Investigasi Data Leakage
-
-Val accuracy 100% pada epoch 7 sempat menimbulkan kecurigaan. Investigasi membuktikan bahwa
-**tidak ada data leakage** — split dilakukan per gambar mikroskopi:
-
-```text
-Train: Im001, Im002, Im003, Im006, Im007, ... (86 gambar original)
-Val  : Im004, Im005, Im012, Im014, Im015, ... (22 gambar original)
-
-Semua sel crop dari Im004 masuk ke val saja, tidak ada yang masuk ke train.
-```
-
-Tidak ada overlap di antara keduanya.
-
-### Mengapa 100% Bisa Genuine?
-
-| Faktor                  | Penjelasan                                                                 |
-| ----------------------- | -------------------------------------------------------------------------- |
-| Pretrained sangat kuat  | ConvNeXtV2 fine-tuned di ImageNet-22k sudah punya fitur visual sangat kaya |
-| Val set kecil           | 204 gambar, binary task — lebih mudah mencapai 100%                       |
-| Kelas visually distinct | Blast cell (inti besar, kromatin kasar) vs normal WBC sangat berbeda       |
-| Dataset terkontrol      | ALL-IDB: satu lab Italia, satu mesin mikroskop, satu batch staining        |
-
-### Catatan Penting untuk Penelitian
-
-Val accuracy 100% **tidak berarti** model akan generalisasi ke dataset lain. Model kemungkinan
-belajar *staining artefacts* khas ALL-IDB Italia, bukan morfologi sel yang general.
-Evaluasi yang bermakna hanya bisa dilakukan dengan external test set dari institusi berbeda.
-
-Inilah alasan mengapa C-NMC evaluation sangat penting — domain-shift gap memberikan gambaran
-yang **lebih jujur** tentang kemampuan generalisasi model.
-
----
-
-## Hasil Eksperimen Nyata
-
-Hasil evaluasi tersimpan di `result/` (format JSON). C-NMC 2019 test set yang digunakan
-berisi **3.527 sel** (subset dari keseluruhan dataset).
-
-### Baseline — ConvNeXtV2-Tiny, tanpa MHA, tanpa mixing aug
-
-| Kondisi                  | Acc    | F1 Macro | F1 Weighted | Precision | Recall |
-| ------------------------ | ------ | -------- | ----------- | --------- | ------ |
-| ALL-IDB val (in-domain)  | 1.0000 | 1.0000   | 1.0000      | 1.0000    | 1.0000 |
-| C-NMC tanpa normalisasi  | 0.6813 | 0.4494   | 0.5778      | 0.6070    | 0.5146 |
-| C-NMC + Macenko          | 0.6833 | 0.5805   | 0.6551      | 0.6163    | 0.5804 |
-| C-NMC + Reinhard         | 0.6765 | 0.4221   | 0.5599      | 0.5422    | 0.5031 |
-| **Domain-shift gap**     | **0.319** | —     | —           | —         | —      |
-
-Confusion matrix in-domain (kelas: `[Abnormal, Normal]`):
-
-```
-[[111,   0],   ← 111 Abnormal terklasifikasi benar, 0 salah klasifikasi
- [  0,  93]]   ← 93 Normal terklasifikasi benar, 0 salah klasifikasi
-```
-
-### FocusAugMix Aggressive — MHA + aug_prob=0.7, paste_ratio=0.35
-
-| Kondisi                  | Acc    | F1 Macro | F1 Weighted | Precision | Recall |
-| ------------------------ | ------ | -------- | ----------- | --------- | ------ |
-| ALL-IDB val (in-domain)  | 0.9951 | 0.9951   | 0.9951      | 0.9955    | 0.9946 |
-| C-NMC tanpa normalisasi  | 0.5186 | 0.5165   | 0.5053      | 0.6399    | 0.6222 |
-| C-NMC + Macenko          | 0.3564 | 0.3178   | 0.2595      | 0.5210    | 0.5073 |
-| C-NMC + Reinhard         | 0.4897 | 0.4877   | 0.4762      | 0.5998    | 0.5878 |
-| **Domain-shift gap**     | **0.477** | —     | —           | —         | —      |
-
-**Temuan kunci:** Augmentasi agresif (`aug_prob=0.7`, `paste_ratio=0.35`) pada dataset yang
-sangat kecil justru memperbesar domain-shift gap (0.477 vs 0.319 baseline). Model sepertinya
-belajar memadupadankan artefak staining ALL-IDB secara lebih agresif, bukan morfologi sel yang
-generalisable. Untuk dataset skala ini, `focusmix_mha` dengan parameter default lebih disarankan.
-
-### Ringkasan Perbandingan Lintas-Domain
-
-| Eksperimen              | Val Acc (in-domain) | CNMC Acc (no norm) | Gap    |
-| ----------------------- | ------------------- | ------------------ | ------ |
-| `baseline`            | 1.0000              | 0.6813             | 0.319  |
-| `focusmix_aggressive` | 0.9951              | 0.5186             | 0.477  |
-
-> Hasil untuk `focusmix_mha`, `mha_only`, `saliency_mix`, `focusmix_v2`, dan `focusmix_full`
-> belum tersedia di `result/` — jalankan `evaluate_external.py` untuk menghasilkannya.
+> **Hasil eksperimen lengkap, analisis val accuracy 100%, dan perbandingan lintas-domain**
+> tersedia di [experiment_results.md](experiment_results.md).
 
 ---
 
@@ -975,4 +893,4 @@ EarlyStopping(monitor='val_loss', mode='min', patience=15),
 
 ---
 
-Last updated: 2026-05-28
+Last updated: 2026-05-30

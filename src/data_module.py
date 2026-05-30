@@ -250,13 +250,18 @@ class LeukemiaDataModule(L.LightningDataModule):
         self.image_size = image_size
         self.save_hyperparameters()
 
-        # Conservative photometric jitter: Giemsa stains are diagnostic
+        # Stain-aware augmentation: simulate cross-domain color variation
+        # Increased jitter + hue + blur to reduce staining artefact reliance
         self.train_transform = transforms.Compose([
             transforms.Resize((image_size, image_size), antialias=True),
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
             transforms.RandomRotation(20),
-            transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1, hue=0.0),
+            transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25, hue=0.08),
+            transforms.RandomGrayscale(p=0.05),
+            transforms.RandomApply(
+                [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.2
+            ),
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ])
@@ -288,15 +293,24 @@ class LeukemiaDataModule(L.LightningDataModule):
         self.classes = self.train_dataset.classes
         self.num_classes = len(self.classes)
 
+    def get_class_weights(self) -> torch.Tensor:
+        """Inverse-frequency class weights from training labels."""
+        targets = torch.tensor(self.train_dataset.dataset.targets)
+        counts = torch.bincount(targets)
+        weights = targets.numel() / (len(counts) * counts.float())
+        return weights
+
     def train_dataloader(self):
+        # focusmix_cam maps live in main process; DataLoader workers can't see them
+        n_workers = 0 if self.aug_mode == 'focusmix_cam' else self.num_workers
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers,
+            num_workers=n_workers,
             collate_fn=focusaugmix_collate_fn,
-            pin_memory=True,
-            persistent_workers=self.num_workers > 0,
+            pin_memory=(n_workers > 0),
+            persistent_workers=(n_workers > 0),
             drop_last=False,
         )
 

@@ -2,7 +2,7 @@ import warnings
 warnings.filterwarnings("ignore", message="triton not found.*", module="torch.utils.flop_counter")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.functional")
 
-from typing import Optional
+from typing import List, Optional
 
 import lightning as L
 import numpy as np
@@ -209,6 +209,7 @@ class LeukemiaLightningModel(L.LightningModule):
         warmup_epochs: int = 5,
         max_epochs: int = 50,
         label_smoothing: float = 0.05,
+        class_weights: Optional[List[float]] = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -222,6 +223,11 @@ class LeukemiaLightningModel(L.LightningModule):
         )
 
         self.label_smoothing = label_smoothing
+        self.register_buffer(
+            'class_weight_tensor',
+            torch.tensor(class_weights, dtype=torch.float32)
+            if class_weights is not None else None,
+        )
 
         self.val_acc = Accuracy(task='multiclass', num_classes=num_classes)
         self.val_f1 = F1Score(task='multiclass', num_classes=num_classes, average='macro')
@@ -235,10 +241,10 @@ class LeukemiaLightningModel(L.LightningModule):
         images, targets_a, targets_b, lam = batch
         logits = self(images)
 
-        ce_a = F.cross_entropy(logits, targets_a, reduction='none',
-                               label_smoothing=self.label_smoothing)
-        ce_b = F.cross_entropy(logits, targets_b, reduction='none',
-                               label_smoothing=self.label_smoothing)
+        ce_a = F.cross_entropy(logits, targets_a, weight=self.class_weight_tensor,
+                               reduction='none', label_smoothing=self.label_smoothing)
+        ce_b = F.cross_entropy(logits, targets_b, weight=self.class_weight_tensor,
+                               reduction='none', label_smoothing=self.label_smoothing)
         loss = (lam * ce_a + (1.0 - lam) * ce_b).mean()
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -247,7 +253,8 @@ class LeukemiaLightningModel(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         images, labels = batch
         logits = self(images)
-        loss = F.cross_entropy(logits, labels, label_smoothing=self.label_smoothing)
+        loss = F.cross_entropy(logits, labels, weight=self.class_weight_tensor,
+                               label_smoothing=self.label_smoothing)
         preds = logits.argmax(dim=1)
 
         self.val_acc(preds, labels)

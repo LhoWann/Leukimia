@@ -46,6 +46,14 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint, EarlyStopping, LearningRateMonitor,
 )
 from lightning.pytorch.loggers import CSVLogger
+from lightning.fabric.plugins.io.torch_io import TorchCheckpointIO
+
+
+class DirectDiskCheckpointIO(TorchCheckpointIO):
+    """Write checkpoint directly to disk, bypassing the BytesIO buffer used by
+    _atomic_save, which causes MemoryError on large models with limited RAM."""
+    def save_checkpoint(self, checkpoint, path, storage_options=None):
+        torch.save(checkpoint, str(path))
 
 from data_module import LeukemiaDataModule
 from lightning_model import LeukemiaLightningModel, GradCAMExtractor
@@ -72,8 +80,8 @@ class ExperimentConfig:
     llrd: float = 0.75
     label_smoothing: float = 0.05
     batch_size: int = 32
-    max_epochs: int = 7
-    warmup_epochs: int = 5
+    max_epochs: int = 30
+    warmup_epochs: int = 3
 
 
 EXPERIMENTS = {
@@ -86,11 +94,13 @@ EXPERIMENTS = {
     ),
 
     # B. Add MHA only (no mixing aug) — isolates contribution of attention.
+    #    MHA needs longer warmup to stabilise before attention weights drift.
     'mha_only': ExperimentConfig(
         name='mha_only',
         aug_mode='none',
         use_mha=True,
         mha_stage=2,
+        warmup_epochs=5,
     ),
 
     # C. Pure SaliencyMix — rectangular saliency-guided patch.
@@ -114,35 +124,45 @@ EXPERIMENTS = {
 
     # E. FocusAugMix V1 style adapted — OcCaMix + MHA (after stage 3).
     #    Tests whether MHA boost generalizes to ConvNeXtV2.
+    #    Extra warmup: MHA + augmentation convergence is slower.
     'focusmix_mha': ExperimentConfig(
         name='focusmix_mha',
         aug_mode='focusmix',
         use_mha=True,
         mha_stage=2,
         paste_ratio=0.25,
+        warmup_epochs=5,
     ),
 
     # F. FocusAugMix V4 style — OcCaMix + Saliency + MHA + Grad-CAM (online).
     #    Most comprehensive; also most expensive. Grad-CAM maps regenerated
     #    every N epochs from current model. Expect this to plateau with
     #    diminishing returns relative to V2/V1.
+    #    Bug fix: train_dataloader uses num_workers=0 for focusmix_cam so
+    #    updated cam maps are visible inside __getitem__ (workers can't share
+    #    main-process state when num_workers > 0).
+    #    Extra warmup: MHA + augmentation convergence is slower.
     'focusmix_full': ExperimentConfig(
         name='focusmix_full',
         aug_mode='focusmix_cam',
         use_mha=True,
         mha_stage=2,
         paste_ratio=0.25,
+        warmup_epochs=5,
     ),
 
-    # G. Aggressive paste ratio — for very small datasets, more aggressive
-    #    mixing acts as stronger regularization. Try if focusmix_v2 saturates.
+    # G. Moderate paste ratio — tuned down from the original aggressive config
+    #    (aug_prob=0.7, paste_ratio=0.35) which worsened domain-shift gap to 0.66.
+    #    Current values: aug_prob=0.5, paste_ratio=0.30 as a middle ground.
+    #    Extra warmup: MHA + augmentation convergence is slower.
     'focusmix_aggressive': ExperimentConfig(
         name='focusmix_aggressive',
         aug_mode='focusmix',
         use_mha=True,
         mha_stage=2,
-        aug_prob=0.7,
-        paste_ratio=0.35,
+        aug_prob=0.5,
+        paste_ratio=0.30,
+        warmup_epochs=5,
     ),
 }
 
@@ -216,7 +236,7 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
     datamodule = LeukemiaDataModule(
         data_dir=data_dir,
         batch_size=cfg.batch_size,
-        num_workers=8,
+        num_workers=2,
         aug_mode=cfg.aug_mode,
         aug_prob=cfg.aug_prob,
         n_segments=cfg.n_segments,
@@ -224,11 +244,15 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
     )
     datamodule.setup()
 
+    # Inverse-frequency class weights to fix minority-class bias
+    class_weights = datamodule.get_class_weights().tolist()
+
     print(f"\n{'=' * 60}")
     print(f"Experiment: {cfg.name}")
     print(f"Config: {asdict(cfg)}")
     print(f"Classes: {datamodule.classes}")
     print(f"Train: {len(datamodule.train_dataset)} | Val: {len(datamodule.val_dataset)}")
+    print(f"Class weights: {[f'{w:.3f}' for w in class_weights]}")
     print(f"{'=' * 60}\n")
 
     model = LeukemiaLightningModel(
@@ -242,20 +266,24 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
         warmup_epochs=cfg.warmup_epochs,
         max_epochs=cfg.max_epochs,
         label_smoothing=cfg.label_smoothing,
+        class_weights=class_weights,
     )
 
     ckpt_dir = Path('checkpoints') / cfg.name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     callbacks = [
+        # Monitor val_f1 (macro): more honest than val_acc for imbalanced classes
         ModelCheckpoint(
             dirpath=ckpt_dir,
-            filename='{epoch:02d}-{val_acc:.4f}',
-            monitor='val_acc',
+            filename='{epoch:02d}-{val_f1:.4f}',
+            monitor='val_f1',
             mode='max',
             save_top_k=1,
             save_last=True,
+            save_weights_only=True,  # avoids MemoryError from serializing optimizer state
         ),
+        # val_loss keeps decreasing even when val_f1=1.0; patience=10/30 = 33%
         EarlyStopping(monitor='val_loss', mode='min', patience=10, verbose=True),
         LearningRateMonitor(logging_interval='epoch'),
     ]
@@ -274,6 +302,7 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
         gradient_clip_val=1.0,
         log_every_n_steps=10,
         deterministic=False,
+        plugins=[DirectDiskCheckpointIO()],
     )
 
     trainer.fit(model, datamodule=datamodule)

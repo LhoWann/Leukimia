@@ -1,0 +1,76 @@
+{
+  "checkpoint": "checkpoints\\focusmix_aggressive\\epoch=04-val_f1=1.0000.ckpt",
+  "in_domain_val": {
+    "n_samples": 204,
+    "accuracy": 1.0,
+    "f1_macro": 1.0,
+    "f1_weighted": 1.0,
+    "precision_macro": 1.0,
+    "recall_macro": 1.0,
+    "confusion_matrix": [
+      [
+        111,
+        0
+      ],
+      [
+        0,
+        93
+      ]
+    ]
+  },
+  "cnmc_no_norm": {
+    "n_samples": 10661,
+    "accuracy": 0.4459243973360848,
+    "f1_macro": 0.4381759787366902,
+    "f1_weighted": 0.41414474117962213,
+    "precision_macro": 0.5858361713476243,
+    "recall_macro": 0.563444336835572,
+    "confusion_matrix": [
+      [
+        1751,
+        5521
+      ],
+      [
+        386,
+        3003
+      ]
+    ]
+  },
+  "cnmc_macenko": {
+    "n_samples": 10661,
+    "accuracy": 0.40183847669074196,
+    "f1_macro": 0.39311739182329886,
+    "f1_weighted": 0.36661976072761693,
+    "precision_macro": 0.5186239996010871,
+    "recall_macro": 0.5136396071740547,
+    "confusion_matrix": [
+      [
+        1503,
+        5769
+      ],
+      [
+        608,
+        2781
+      ]
+    ]
+  },
+  "cnmc_reinhard": {
+    "n_samples": 10661,
+    "accuracy": 0.5178688678360379,
+    "f1_macro": 0.5164027660461942,
+    "f1_weighted": 0.5261010168979203,
+    "precision_macro": 0.5685719026199079,
+    "recall_macro": 0.5739551714097346,
+    "confusion_matrix": [
+      [
+        3054,
+        4218
+      ],
+      [
+        922,
+        2467
+      ]
+    ]
+  },
+  "domain_shift_gap": 0.5540756026639152
+}
