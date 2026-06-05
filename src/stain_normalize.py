@@ -284,13 +284,24 @@ def compute_reference_from_dir(
     n_samples: int = 100,
     image_size: int = 224,
     seed: int = 42,
+    balanced: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute aggregate stain reference statistics from a directory of images.
 
+    Parameters
+    ----------
+    balanced : bool
+        When True (default), sample equally from each class sub-directory so
+        the reference statistics are not skewed by class imbalance.  Falls back
+        to random sampling when no sub-directories are found.
+
     Returns
     -------
-    reference_image : HxWx3 uint8 — single representative image (for Macenko)
+    reference_image : HxWx3 uint8 — single representative image (for Macenko).
+                      Chosen as the sample whose LAB mean is closest to the
+                      global mean, giving a representative rather than random
+                      reference stain profile.
     reinhard_mean   : (3,) float32 — mean LAB per channel across n_samples
     reinhard_std    : (3,) float32 — std  LAB per channel across n_samples
     """
@@ -299,28 +310,48 @@ def compute_reference_from_dir(
 
     root = Path(directory)
     exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
-    all_imgs = [p for p in root.rglob('*') if p.suffix.lower() in exts]
-    rnd.shuffle(all_imgs)
-    selected = all_imgs[:n_samples]
 
-    lab_means, lab_stds = [], []
-    reference_image = None
+    selected: list
+    if balanced:
+        subdirs = sorted([d for d in root.iterdir() if d.is_dir()])
+        if len(subdirs) >= 2:
+            per_class = max(1, n_samples // len(subdirs))
+            selected = []
+            for subdir in subdirs:
+                imgs = sorted([p for p in subdir.iterdir() if p.suffix.lower() in exts])
+                rnd.shuffle(imgs)
+                selected.extend(imgs[:per_class])
+        else:
+            balanced = False  # no class sub-dirs found, fall back to random
 
-    for i, img_path in enumerate(selected):
+    if not balanced:
+        all_imgs = [p for p in root.rglob('*') if p.suffix.lower() in exts]
+        rnd.shuffle(all_imgs)
+        selected = all_imgs[:n_samples]
+
+    lab_means, lab_stds, imgs_np = [], [], []
+
+    for img_path in selected:
         try:
             img = Image.open(img_path).convert('RGB')
             img_np = np.array(img.resize((image_size, image_size), Image.BILINEAR))
             lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB).astype(np.float32)
             lab_means.append(lab.mean(axis=(0, 1)))
             lab_stds.append(lab.std(axis=(0, 1)))
-            if i == 0:
-                reference_image = img_np
+            imgs_np.append(img_np)
         except Exception:
             continue
 
     if not lab_means:
         raise RuntimeError(f"No valid images found in {directory}")
 
-    mean_global = np.stack(lab_means).mean(axis=0)
+    means_arr   = np.stack(lab_means)           # (N, 3)
+    mean_global = means_arr.mean(axis=0)
     std_global  = np.stack(lab_stds).mean(axis=0)
+
+    # Reference image: sample whose LAB mean is closest to the global mean
+    # (avoids staining outliers as the Macenko reference anchor)
+    dists = np.linalg.norm(means_arr - mean_global, axis=1)
+    reference_image = imgs_np[int(np.argmin(dists))]
+
     return reference_image, mean_global, std_global

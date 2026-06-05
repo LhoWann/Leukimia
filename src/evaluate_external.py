@@ -52,10 +52,13 @@ def _worker_init_fn(worker_id: int) -> None:
 
 import argparse
 import json
+import random
 import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import torchvision.transforms.functional as TF
 
 import cv2
 import numpy as np
@@ -244,6 +247,58 @@ def run_inference(
     return np.array(all_preds), np.array(all_labels), np.array(all_probs)
 
 
+def _tta_augment(
+    images: torch.Tensor,
+    mean_t: torch.Tensor,
+    std_t: torch.Tensor,
+) -> torch.Tensor:
+    """Un-normalize → random flip+rotate → re-normalize (all on GPU tensors)."""
+    imgs = (images * std_t + mean_t).clamp(0.0, 1.0)
+    augmented = []
+    for img in imgs:                              # img: (3, H, W)
+        if random.random() > 0.5:
+            img = TF.hflip(img)
+        if random.random() > 0.5:
+            img = TF.vflip(img)
+        img = TF.rotate(img, random.uniform(-30.0, 30.0))
+        augmented.append(img)
+    imgs = torch.stack(augmented, dim=0)
+    return (imgs - mean_t) / std_t
+
+
+@torch.no_grad()
+def run_inference_tta(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    n_tta: int = 8,
+    desc: str = 'Evaluating (TTA)',
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Test-Time Augmentation: for each batch run n_tta augmented forward passes,
+    average softmax probabilities, then argmax. Improves robustness without
+    retraining, especially for cross-domain inference.
+    """
+    model.eval()
+    mean_t = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
+    std_t  = torch.tensor(IMAGENET_STD,  device=device).view(1, 3, 1, 1)
+
+    all_preds, all_labels, all_probs = [], [], []
+    for images, labels in tqdm(loader, desc=desc, ncols=80):
+        images   = images.to(device, non_blocking=True)
+        prob_sum = None
+        for _ in range(n_tta):
+            aug    = _tta_augment(images, mean_t, std_t)
+            logits = model(aug)
+            probs  = F.softmax(logits, dim=1)
+            prob_sum = probs if prob_sum is None else prob_sum + probs
+        avg_probs = (prob_sum / n_tta).cpu().numpy()
+        all_preds.extend(avg_probs.argmax(axis=1))
+        all_labels.extend(labels.numpy())
+        all_probs.extend(avg_probs)
+    return np.array(all_preds), np.array(all_labels), np.array(all_probs)
+
+
 def compute_metrics(
     preds: np.ndarray,
     labels: np.ndarray,
@@ -260,6 +315,25 @@ def compute_metrics(
     }
     report = classification_report(labels, preds, target_names=class_names, zero_division=0)
     return metrics, report
+
+
+def find_optimal_threshold(probs: np.ndarray, labels: np.ndarray) -> float:
+    """
+    Scan P(class-1 / Normal) thresholds in [0.05, 0.95] and return the one
+    that maximises F1-macro.
+
+    This is a post-hoc analysis: calibrating on the same set used for testing
+    gives an oracle upper bound on F1 improvement with threshold adjustment.
+    In production, calibrate on a small held-out labelled set from the target
+    domain instead of the full test set.
+    """
+    best_f1, best_thr = 0.0, 0.5
+    for thr in np.linspace(0.05, 0.95, 91):
+        preds = (probs[:, 1] >= thr).astype(int)
+        f1 = f1_score(labels, preds, average='macro', zero_division=0)
+        if f1 > best_f1:
+            best_f1, best_thr = f1, float(thr)
+    return best_thr
 
 
 def _banner(title: str) -> str:
@@ -313,13 +387,15 @@ def evaluate_checkpoint(
     skip_val: bool,
     no_macenko: bool,
     no_reinhard: bool,
+    n_tta: int = 1,
 ) -> Dict:
     """
     Run all evaluation conditions for one checkpoint.
-    Returns the full results dict (same structure as before, keyed by condition).
+    n_tta > 1 enables Test-Time Augmentation for all C-NMC conditions.
     """
+    tta_tag = f'  [TTA×{n_tta}]' if n_tta > 1 else ''
     print(f"\n{'═' * 60}")
-    print(f"  Experiment : {exp_name}")
+    print(f"  Experiment : {exp_name}{tta_tag}")
     print(f"  Checkpoint : {ckpt_path.name}")
     print(f"{'═' * 60}")
 
@@ -329,9 +405,15 @@ def evaluate_checkpoint(
     model = lightning_model.model
     model.eval().to(device)
 
-    results: Dict = {'checkpoint': str(ckpt_path)}
+    # Choose inference function based on TTA flag
+    def _infer(loader, desc):
+        if n_tta > 1:
+            return run_inference_tta(model, loader, device, n_tta, desc)
+        return run_inference(model, loader, device, desc)
 
-    # ── 1. In-domain validation ───────────────────────────────────────────────
+    results: Dict = {'checkpoint': str(ckpt_path), 'n_tta': n_tta}
+
+    # ── 1. In-domain validation (no TTA — val set is in-distribution) ─────────
     if not skip_val:
         val_transform = transforms.Compose([
             transforms.Resize((image_size, image_size), antialias=True),
@@ -359,10 +441,13 @@ def evaluate_checkpoint(
     print(f"\nC-NMC images: {len(cnmc_raw)}  →  {label_counts}")
 
     raw_loader  = build_loader(cnmc_raw, batch_size, num_workers)
-    raw_preds, raw_labels, _ = run_inference(model, raw_loader, device, 'C-NMC (no norm)')
+    raw_preds, raw_labels, raw_probs = _infer(raw_loader, 'C-NMC (no norm)')
     raw_metrics, raw_report  = compute_metrics(raw_preds, raw_labels, class_names)
     print_result('C-NMC 2019  ·  No Stain Normalization', raw_metrics, raw_report)
     results['cnmc_no_norm'] = raw_metrics
+
+    # Track probs per condition for threshold calibration (keyed by result key)
+    _cond_probs: Dict[str, np.ndarray] = {'cnmc_no_norm': raw_probs}
 
     # ── 3. Macenko ────────────────────────────────────────────────────────────
     if not no_macenko and ref_image is not None:
@@ -374,10 +459,11 @@ def evaluate_checkpoint(
                 normalizer=macenko, image_size=image_size,
             )
             mac_loader = build_loader(cnmc_mac, batch_size, num_workers=0)
-            mac_preds, mac_labels, _ = run_inference(model, mac_loader, device, 'C-NMC (Macenko)')
+            mac_preds, mac_labels, mac_probs = _infer(mac_loader, 'C-NMC (Macenko)')
             mac_metrics, mac_report  = compute_metrics(mac_preds, mac_labels, class_names)
             print_result('C-NMC 2019  ·  Macenko Normalization', mac_metrics, mac_report)
             results['cnmc_macenko'] = mac_metrics
+            _cond_probs['cnmc_macenko'] = mac_probs
         except Exception as exc:
             print(f"  Macenko normalization failed: {exc}")
 
@@ -391,35 +477,221 @@ def evaluate_checkpoint(
                 normalizer=reinhard, image_size=image_size,
             )
             rh_loader = build_loader(cnmc_rh, batch_size, num_workers=0)
-            rh_preds, rh_labels, _ = run_inference(model, rh_loader, device, 'C-NMC (Reinhard)')
+            rh_preds, rh_labels, rh_probs = _infer(rh_loader, 'C-NMC (Reinhard)')
             rh_metrics, rh_report  = compute_metrics(rh_preds, rh_labels, class_names)
             print_result('C-NMC 2019  ·  Reinhard Normalization', rh_metrics, rh_report)
             results['cnmc_reinhard'] = rh_metrics
+            _cond_probs['cnmc_reinhard'] = rh_probs
         except Exception as exc:
             print(f"  Reinhard normalization failed: {exc}")
 
+    # ── 5. Threshold calibration ──────────────────────────────────────────────
+    # Optimal threshold found on no-norm set (proxy for target-domain calibration).
+    # Applied uniformly to all normalization conditions to simulate a scenario
+    # where a small labelled target-domain set is used for threshold tuning.
+    # NOTE: calibrating on the full test set is an oracle upper bound; in
+    # production, use a held-out calibration split from the target domain.
+    opt_thr = find_optimal_threshold(raw_probs, raw_labels)
+    results['optimal_threshold'] = opt_thr
+    for key, probs in _cond_probs.items():
+        cal_preds = (probs[:, 1] >= opt_thr).astype(int)
+        cal_m, _  = compute_metrics(cal_preds, raw_labels, class_names)
+        results[f'{key}_calibrated'] = {**cal_m, 'threshold': opt_thr}
+
     # ── Per-experiment summary ────────────────────────────────────────────────
-    print(f"\n  {'Condition':<40}  {'Acc':>6}  {'F1':>6}")
-    print(f"  {'─'*40}  {'─'*6}  {'─'*6}")
+    print(f"\n  {'Condition':<40}  {'Acc':>6}  {'F1':>6}  {'F1-cal':>7}")
+    print(f"  {'─'*40}  {'─'*6}  {'─'*6}  {'─'*7}")
     if not skip_val and val_metrics:
-        print(f"  {'ALL-IDB val (in-domain)':<40}  {val_metrics['accuracy']:.4f}  {val_metrics['f1_macro']:.4f}")
-    print(f"  {'C-NMC — no normalization':<40}  {raw_metrics['accuracy']:.4f}  {raw_metrics['f1_macro']:.4f}")
+        print(f"  {'ALL-IDB val (in-domain)':<40}  {val_metrics['accuracy']:.4f}  {val_metrics['f1_macro']:.4f}       —")
+    _fmt_cal = lambda k: f"{results[k+'_calibrated']['f1_macro']:.4f}" if k+'_calibrated' in results else '     —'
+    print(f"  {'C-NMC — no normalization':<40}  {raw_metrics['accuracy']:.4f}  {raw_metrics['f1_macro']:.4f}  {_fmt_cal('cnmc_no_norm')}")
     if 'cnmc_macenko'  in results:
         m = results['cnmc_macenko']
-        print(f"  {'C-NMC — Macenko':<40}  {m['accuracy']:.4f}  {m['f1_macro']:.4f}")
+        print(f"  {'C-NMC — Macenko':<40}  {m['accuracy']:.4f}  {m['f1_macro']:.4f}  {_fmt_cal('cnmc_macenko')}")
     if 'cnmc_reinhard' in results:
         m = results['cnmc_reinhard']
-        print(f"  {'C-NMC — Reinhard':<40}  {m['accuracy']:.4f}  {m['f1_macro']:.4f}")
+        print(f"  {'C-NMC — Reinhard':<40}  {m['accuracy']:.4f}  {m['f1_macro']:.4f}  {_fmt_cal('cnmc_reinhard')}")
+    print(f"\n  Optimal threshold (calibrated on no-norm, class=Normal): {opt_thr:.2f}")
 
     if not skip_val and val_metrics:
         gap = val_metrics['accuracy'] - raw_metrics['accuracy']
-        print(f"\n  Domain-shift gap (val_acc − raw_acc) : {gap:+.4f}")
+        print(f"  Domain-shift gap (val_acc − raw_acc) : {gap:+.4f}")
         results['domain_shift_gap'] = float(gap)
 
     # Free GPU memory before loading next model
     del model, lightning_model
     if device.type == 'cuda':
         torch.cuda.empty_cache()
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ensemble evaluation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def evaluate_ensemble(
+    exp_names: List[str],
+    ckpt_root: Path,
+    cnmc_dir: str,
+    data_dir: str,
+    device: torch.device,
+    class_to_idx: Dict[str, int],
+    idx_to_class: Dict[int, str],
+    class_names: List[str],
+    ref_image: Optional[np.ndarray],
+    rh_mean: Optional[np.ndarray],
+    rh_std: Optional[np.ndarray],
+    batch_size: int,
+    image_size: int,
+    skip_val: bool,
+    no_macenko: bool,
+    no_reinhard: bool,
+    n_tta: int = 1,
+) -> Dict:
+    """
+    Ensemble: load each checkpoint sequentially, accumulate softmax probabilities,
+    then average and compute final metrics. Memory-efficient — only one model
+    lives on GPU at a time.
+    """
+    # ── Resolve checkpoints ────────────────────────────────────────────────────
+    ckpts: List[Tuple[str, Path]] = []
+    for name in exp_names:
+        exp_dir = ckpt_root / name
+        if not exp_dir.exists():
+            print(f"  [ensemble skip] {name}: directory not found")
+            continue
+        ckpt = find_best_ckpt(exp_dir)
+        if ckpt is None:
+            print(f"  [ensemble skip] {name}: no checkpoint")
+            continue
+        ckpts.append((name, ckpt))
+
+    if not ckpts:
+        return {'error': 'no valid checkpoints for ensemble'}
+
+    tta_tag = f'  [TTA×{n_tta}]' if n_tta > 1 else ''
+    print(f"\n{'═' * 60}")
+    print(f"  ENSEMBLE ({len(ckpts)} models){tta_tag}")
+    for name, ckpt in ckpts:
+        print(f"    {name:<30}  {ckpt.name}")
+    print(f"{'═' * 60}")
+
+    # ── Build CNMC datasets once, reuse across models ─────────────────────────
+    # (normalizers are not picklable → always num_workers=0 for normalised sets)
+    Condition = Tuple[str, str, object]       # (result_key, display_name, normalizer)
+    conditions: List[Condition] = [('no_norm', 'No Stain Normalization', None)]
+    if not no_macenko and ref_image is not None:
+        try:
+            conditions.append(('macenko', 'Macenko Normalization', MacenkoNormalizer().fit(ref_image)))
+        except Exception as exc:
+            print(f"  Macenko setup failed: {exc}")
+    if not no_reinhard and rh_mean is not None:
+        try:
+            conditions.append(('reinhard', 'Reinhard Normalization', ReinhardNormalizer().fit_from_stats(rh_mean, rh_std)))
+        except Exception as exc:
+            print(f"  Reinhard setup failed: {exc}")
+
+    cnmc_datasets = {
+        key: ExternalTestDataset(cnmc_dir, class_to_idx, norm, image_size)
+        for key, _, norm in conditions
+    }
+    true_labels  = np.array([lbl for _, lbl in cnmc_datasets['no_norm'].samples])
+    label_counts = {}
+    for lbl in true_labels:
+        label_counts[idx_to_class[lbl]] = label_counts.get(idx_to_class[lbl], 0) + 1
+    print(f"\nC-NMC images: {len(true_labels)}  →  {label_counts}")
+
+    # ── Accumulate softmax probabilities ───────────────────────────────────────
+    acc_probs: Dict[str, Optional[np.ndarray]] = {key: None for key, _, _ in conditions}
+    val_accs:  List[float] = []
+    val_f1s:   List[float] = []
+
+    for exp_name, ckpt_path in ckpts:
+        print(f"\n  — {exp_name}  ({ckpt_path.name})")
+        lm    = LeukemiaLightningModel.load_from_checkpoint(str(ckpt_path), map_location=device)
+        model = lm.model.eval().to(device)
+
+        # In-domain val per member (no TTA — in-distribution)
+        if not skip_val:
+            val_transform = transforms.Compose([
+                transforms.Resize((image_size, image_size), antialias=True),
+                transforms.ToTensor(),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            ])
+            val_ds     = tv_datasets.ImageFolder(str(Path(data_dir) / 'val'), transform=val_transform)
+            val_loader = build_loader(val_ds, batch_size, num_workers=0)
+            vp, vl, _  = run_inference(model, val_loader, device, f'    val ({exp_name})')
+            vm, _      = compute_metrics(vp, vl, class_names)
+            val_accs.append(vm['accuracy'])
+            val_f1s.append(vm['f1_macro'])
+            print(f"    val_acc={vm['accuracy']:.4f}  val_f1={vm['f1_macro']:.4f}")
+
+        # CNMC conditions
+        for key, _, _ in conditions:
+            loader = build_loader(cnmc_datasets[key], batch_size, num_workers=0)
+            desc   = f'    {exp_name}/{key}'
+            if n_tta > 1:
+                _, _, probs = run_inference_tta(model, loader, device, n_tta, desc)
+            else:
+                _, _, probs = run_inference(model, loader, device, desc)
+            acc_probs[key] = probs if acc_probs[key] is None else acc_probs[key] + probs
+
+        del model, lm
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
+    # ── Average + compute metrics ──────────────────────────────────────────────
+    n_models = len(ckpts)
+    results: Dict = {'ensemble_members': [n for n, _ in ckpts], 'n_tta': n_tta}
+    raw_acc: Optional[float] = None
+    _ens_avg_probs: Dict[str, np.ndarray] = {}
+
+    for key, display_name, _ in conditions:
+        avg_probs       = acc_probs[key] / n_models
+        preds           = avg_probs.argmax(axis=1)
+        metrics, report = compute_metrics(preds, true_labels, class_names)
+        results[f'cnmc_{key}'] = metrics
+        _ens_avg_probs[key]    = avg_probs
+        print_result(f'Ensemble  ·  C-NMC 2019  ·  {display_name}', metrics, report)
+        if key == 'no_norm':
+            raw_acc = metrics['accuracy']
+
+    # In-domain val: average metrics across members
+    if not skip_val and val_accs:
+        avg_val_acc = float(np.mean(val_accs))
+        avg_val_f1  = float(np.mean(val_f1s))
+        results['in_domain_val'] = {
+            'accuracy': avg_val_acc, 'f1_macro': avg_val_f1,
+            'note': 'mean across ensemble members',
+        }
+        if raw_acc is not None:
+            gap = avg_val_acc - raw_acc
+            results['domain_shift_gap'] = float(gap)
+
+    # ── Threshold calibration ─────────────────────────────────────────────────
+    if 'no_norm' in _ens_avg_probs:
+        opt_thr = find_optimal_threshold(_ens_avg_probs['no_norm'], true_labels)
+        results['optimal_threshold'] = opt_thr
+        for key in _ens_avg_probs:
+            cal_preds = (_ens_avg_probs[key][:, 1] >= opt_thr).astype(int)
+            cal_m, _  = compute_metrics(cal_preds, true_labels, class_names)
+            results[f'cnmc_{key}_calibrated'] = {**cal_m, 'threshold': opt_thr}
+    else:
+        opt_thr = 0.5
+
+    # ── Ensemble summary ──────────────────────────────────────────────────────
+    print(f"\n  {'Condition':<40}  {'Acc':>6}  {'F1':>6}  {'F1-cal':>7}")
+    print(f"  {'─'*40}  {'─'*6}  {'─'*6}  {'─'*7}")
+    if not skip_val and val_accs:
+        print(f"  {'ALL-IDB val (avg across members)':<40}  {results['in_domain_val']['accuracy']:.4f}  {results['in_domain_val']['f1_macro']:.4f}       —")
+    _fmt_cal = lambda k: f"{results['cnmc_'+k+'_calibrated']['f1_macro']:.4f}" if 'cnmc_'+k+'_calibrated' in results else '     —'
+    for key, display_name, _ in conditions:
+        m = results[f'cnmc_{key}']
+        print(f"  {display_name:<40}  {m['accuracy']:.4f}  {m['f1_macro']:.4f}  {_fmt_cal(key)}")
+    print(f"\n  Optimal threshold (calibrated on no-norm, class=Normal): {opt_thr:.2f}")
+    if 'domain_shift_gap' in results:
+        print(f"  Domain-shift gap (val_acc − raw_acc) : {results['domain_shift_gap']:+.4f}")
 
     return results
 
@@ -468,6 +740,14 @@ def main() -> None:
     # Auto mode
     parser.add_argument('--results-dir',  type=str, default='results',
                         help='[auto mode] Directory to write per-experiment JSON files')
+    # TTA
+    parser.add_argument('--tta-n', type=int, default=1, metavar='N',
+                        help='Test-Time Augmentation passes per image (1 = disabled, 8 = recommended)')
+    # Ensemble
+    parser.add_argument('--ensemble', nargs='+', default=None, metavar='EXP',
+                        help='Evaluate ensemble of named experiments '
+                             '(e.g. --ensemble focusmix_v2 baseline saliency_mix). '
+                             'Mutually exclusive with --ckpt / auto mode.')
     args = parser.parse_args()
 
     # ── Device ────────────────────────────────────────────────────────────────
@@ -502,16 +782,48 @@ def main() -> None:
         except Exception as exc:
             print(f"  WARNING: Could not compute reference statistics: {exc}")
 
-    # ── Build experiment list ─────────────────────────────────────────────────
+    # ── Shared kwargs (reused by single/auto/ensemble modes) ─────────────────
+    shared_kwargs = dict(
+        cnmc_dir    = args.cnmc_dir,
+        data_dir    = args.data_dir,
+        device      = device,
+        class_to_idx= class_to_idx,
+        idx_to_class= idx_to_class,
+        class_names = class_names,
+        ref_image   = ref_image,
+        rh_mean     = rh_mean,
+        rh_std      = rh_std,
+        batch_size  = args.batch_size,
+        image_size  = args.image_size,
+        skip_val    = args.skip_val,
+        no_macenko  = args.no_macenko,
+        no_reinhard = args.no_reinhard,
+        n_tta       = args.tta_n,
+    )
+
+    # ── Ensemble mode ─────────────────────────────────────────────────────────
+    if args.ensemble:
+        ens_result = evaluate_ensemble(
+            exp_names=args.ensemble,
+            ckpt_root=Path(args.ckpt_dir),
+            **shared_kwargs,
+        )
+        results_dir = Path(args.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        ens_label = '+'.join(args.ensemble)
+        out_path  = results_dir / f'ensemble_{ens_label}.json'
+        with open(out_path, 'w') as f:
+            json.dump(ens_result, f, indent=2)
+        print(f"\n  Saved → {out_path}")
+        return   # skip single/auto evaluation
+
+    # ── Build experiment list (single or auto mode) ───────────────────────────
     if args.ckpt:
-        # Single-model mode (backward compat)
         ckpt_path = Path(args.ckpt)
         if not ckpt_path.exists():
             sys.exit(f"ERROR: checkpoint not found: {ckpt_path}")
-        exp_name = ckpt_path.parent.name
-        experiments = [(exp_name, ckpt_path)]
+        experiments = [(ckpt_path.parent.name, ckpt_path)]
     else:
-        # Auto mode — scan all sub-directories
         ckpt_root = Path(args.ckpt_dir)
         if not ckpt_root.exists():
             sys.exit(f"ERROR: checkpoint directory not found: {ckpt_root}")
@@ -523,23 +835,7 @@ def main() -> None:
 
     # ── Evaluate each experiment ──────────────────────────────────────────────
     all_exp_results: Dict[str, Dict] = {}
-    eval_kwargs = dict(
-        cnmc_dir    = args.cnmc_dir,
-        data_dir    = args.data_dir,
-        device      = device,
-        class_to_idx= class_to_idx,
-        idx_to_class= idx_to_class,
-        class_names = class_names,
-        ref_image   = ref_image,
-        rh_mean     = rh_mean,
-        rh_std      = rh_std,
-        batch_size  = args.batch_size,
-        num_workers = args.num_workers,
-        image_size  = args.image_size,
-        skip_val    = args.skip_val,
-        no_macenko  = args.no_macenko,
-        no_reinhard = args.no_reinhard,
-    )
+    eval_kwargs = dict(**shared_kwargs, num_workers=args.num_workers)
 
     for exp_name, ckpt_path in experiments:
         try:

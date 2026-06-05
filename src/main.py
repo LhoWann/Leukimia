@@ -82,6 +82,10 @@ class ExperimentConfig:
     batch_size: int = 32
     max_epochs: int = 30
     warmup_epochs: int = 3
+    use_robust_aug: bool = False  # ReinhardJitter + RandomRotation(180) + RandomPerspective
+    stain_sigma_mean: float = 0.15  # ReinhardJitter shift magnitude
+    stain_sigma_std: float = 0.10   # ReinhardJitter scale magnitude
+    stain_aug_prob: float = 0.5     # probability of applying ReinhardJitter
 
 
 EXPERIMENTS = {
@@ -164,6 +168,43 @@ EXPERIMENTS = {
         paste_ratio=0.30,
         warmup_epochs=5,
     ),
+
+    # H. Cross-domain robust variant — best single-model baseline (focusmix_v2,
+    #    gap=0.274) extended with three domain-generalisation improvements:
+    #      1. ReinhardJitter    : random LAB-space stain perturbation (p=0.5)
+    #         simulates inter-lab/inter-batch staining variation
+    #      2. RandomRotation(180): full orientation invariance (cells have no
+    #         canonical orientation in smears)
+    #      3. RandomPerspective  : minor smear-prep deformation (distortion=0.1)
+    #    No MHA — experiments show MHA increases domain-shift gap consistently.
+    'focusmix_v2_robust': ExperimentConfig(
+        name='focusmix_v2_robust',
+        aug_mode='focusmix',
+        use_mha=False,
+        paste_ratio=0.25,
+        n_segments=50,
+        use_robust_aug=True,
+    ),
+
+    # I. Stronger stain augmentation — same as H but with increased ReinhardJitter
+    #    strength and application probability to better simulate the larger stain
+    #    gap between ALL-IDB (Giemsa, Italy) and C-NMC (Wright-Giemsa, India).
+    #    Analysis showed the model learns stain shortcuts; stronger jitter forces
+    #    it to rely on morphological features instead.
+    #      sigma_mean: 0.15 → 0.25  (wider LAB mean shift range)
+    #      sigma_std:  0.10 → 0.15  (wider LAB std scale range)
+    #      stain_aug_prob: 0.5 → 0.7 (applied more often)
+    'focusmix_v2_robust_v2': ExperimentConfig(
+        name='focusmix_v2_robust_v2',
+        aug_mode='focusmix',
+        use_mha=False,
+        paste_ratio=0.25,
+        n_segments=50,
+        use_robust_aug=True,
+        stain_sigma_mean=0.25,
+        stain_sigma_std=0.15,
+        stain_aug_prob=0.7,
+    ),
 }
 
 
@@ -241,6 +282,10 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
         aug_prob=cfg.aug_prob,
         n_segments=cfg.n_segments,
         paste_ratio=cfg.paste_ratio,
+        use_robust_aug=cfg.use_robust_aug,
+        stain_sigma_mean=cfg.stain_sigma_mean,
+        stain_sigma_std=cfg.stain_sigma_std,
+        stain_aug_prob=cfg.stain_aug_prob,
     )
     datamodule.setup()
 

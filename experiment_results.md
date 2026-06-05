@@ -283,6 +283,79 @@ Eksperimen dengan MHA cenderung kolaps ke satu kelas, baik over-predict Abnormal
 `saliency_mix`) maupun over-predict Normal (`focusmix_mha`, `focusmix_full`). Ini konsisten
 dengan hipotesis bahwa MHA overfits ke distribusi kelas training ALL-IDB.
 
+### 6. Gap Per-Kelas: Recall Abnormal vs Normal pada Data Eksternal
+
+Salah satu temuan paling krusial adalah **asimetri recall per kelas** antara Abnormal (ALL/blast)
+dan Normal (HEM) pada C-NMC. Gap ini jauh lebih informatif dari sekedar gap keseluruhan.
+
+#### Recall Per-Kelas dari Confusion Matrix (C-NMC No Norm)
+
+| Eksperimen            | Recall Abnormal | Recall Normal | Gap (Abn − Norm) | Arah Bias     |
+| --------------------- | :-------------: | :-----------: | :--------------: | ------------- |
+| `baseline`          |     93.5%       |     16.5%     |    **+77.0%**  | → Abnormal    |
+| `mha_only`          |     96.7%       |      4.9%     |    **+91.8%**  | → Abnormal    |
+| `saliency_mix`      |     99.5%       |      1.4%     |    **+98.1%**  | → Abnormal    |
+| `focusmix_v2`       |     83.2%       |     49.9%     |    **+33.3%**  | → Abnormal    |
+| `focusmix_mha`      |     28.4%       |     86.9%     |    **−58.5%**  | → Normal      |
+| `focusmix_aggressive` |   24.1%       |     88.6%     |    **−64.5%**  | → Normal      |
+| `focusmix_full`     |      7.0%       |     95.3%     |    **−88.3%**  | → Normal      |
+
+> Recall per kelas dihitung langsung dari diagonal confusion matrix:
+> Recall Abnormal = TP_abn / (TP_abn + FN_abn), Recall Normal = TP_norm / (TP_norm + FN_norm)
+
+#### Mengapa Ada Gap dan Kenapa Arahnya Berbeda?
+
+Ada dua pola berlawanan yang masing-masing punya penjelasan tersendiri.
+
+**Pola 1 — Bias ke Abnormal (baseline, mha_only, saliency_mix):**
+
+1. **Imbalance kelas training.** Training ALL-IDB memiliki ~372 Abnormal vs ~184 Normal (rasio ≈2:1).
+   Model yang belajar dari distribusi ini secara natural cenderung memprediksi Abnormal karena
+   itu pilihan yang lebih "aman" secara statistik.
+
+2. **Ciri morfologi blast cell lebih persisten lintas domain.** Sel Abnormal (blast) memiliki
+   ciri khas yang kuat — inti besar, kromatin kasar, rasio nukleus-sitoplasma tinggi — yang
+   relatif tetap terlihat walaupun protokol pewarnaan berbeda (Giemsa Italia vs Wright-Giemsa India).
+   Sebaliknya, sel Normal (HEM/limfosit) lebih sensitif terhadap perubahan staining: sitoplasma
+   dan membran sel berubah warna secara berbeda di Wright-Giemsa, membuat fitur warna yang dipelajari
+   dari ALL-IDB tidak lagi cocok.
+
+3. **Distibusi C-NMC menguntungkan bias Abnormal.** C-NMC train-merged berisi 68% ALL dan 32% HEM.
+   Model yang memprediksi "semua Abnormal" secara naif pun mendapat accuracy ~68%, sehingga
+   akurasi keseluruhan terlihat wajar padahal recall Normal nyaris nol.
+
+**Pola 2 — Bias ke Normal (focusmix_mha, focusmix_aggressive, focusmix_full):**
+
+1. **FocusAugMix mengacaukan representasi Abnormal.** FocusAugMix mem-paste potongan superpixel
+   dari satu gambar ke gambar lain. Ketika diterapkan ke sel Abnormal di dataset kecil, patch
+   Normal yang di-paste ke wilayah sel blast menciptakan pola "tambal sulam" yang tidak
+   konsisten. Model belajar bahwa penampilan yang tidak seragam itu adalah ciri Abnormal —
+   tetapi di C-NMC, sel blast terlihat uniform tanpa tambalan, sehingga model salah
+   mengklasifikasikannya sebagai Normal.
+
+2. **MHA memperkuat fitur lokal yang domain-spesifik.** MHA mempelajari *spatial attention
+   patterns* pada token 14×14 dari stage backbone. Pada ALL-IDB yang homogen (satu lab, satu
+   protokol), pola atensi ini sangat spesifik terhadap warna dan tekstur Giemsa Italia. Ketika
+   ditambah FocusAugMix yang agresif, model mengkonsolidasikan perhatiannya ke pola yang tidak
+   ada di C-NMC domain, mengakibatkan prediksi Normal secara masif.
+
+3. **Representasi Abnormal yang terdegradasi.** Kombinasi FocusAugMix+MHA pada dataset kecil
+   (~556 training samples) dalam hanya ≤7 epoch membuat representasi kelas Abnormal "terpecah"
+   dan tidak kompak di feature space. Di domain sumber pun representasi ini cukup untuk
+   mengklasifikasikan dengan benar, tetapi ketika domain bergeser, representasi yang lemah ini
+   tidak bisa mempertahankan discoverability kelas Abnormal.
+
+#### Implikasi Praktis
+
+Gap per-kelas ini sangat kritis dalam konteks medis:
+
+- **False Negative Abnormal (FN Abn) lebih berbahaya** — sel leukemia yang diprediksi Normal
+  berarti pasien tidak terdeteksi. Eksperimen `focusmix_mha`, `focusmix_aggressive`, dan
+  `focusmix_full` memiliki FN Abn sangat tinggi (>5000 dari 7272 ALL).
+- **Accuracy overall dapat menyesatkan.** Accuracy 70%+ bisa terjadi dengan recall Normal
+  yang mendekati nol, hanya karena distribusi kelas C-NMC yang tidak seimbang.
+- **F1 macro adalah metrik yang lebih jujur** untuk skenario lintas-domain dengan class imbalance.
+
 ---
 
 ## Rekomendasi
@@ -307,4 +380,4 @@ dengan hipotesis bahwa MHA overfits ke distribusi kelas training ALL-IDB.
 
 ---
 
-Last updated: 2026-05-30
+Last updated: 2026-06-05

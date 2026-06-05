@@ -138,7 +138,43 @@ def saliency_mix(
     return mixed, float(lam)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stain augmentation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ReinhardJitter:
+    """
+    Simulates inter-lab staining variation by randomly perturbing per-channel
+    LAB color statistics. Mirrors what different stain batches or microscope
+    settings do in practice, encouraging the model to learn stain-invariant
+    morphology features.
+
+    Works on PIL Images (apply before ToTensor in the transform pipeline).
+    sigma_mean: controls shift of channel mean (relative to channel std)
+    sigma_std:  controls log-scale perturbation of channel std
+    """
+    def __init__(self, sigma_mean: float = 0.15, sigma_std: float = 0.10):
+        self.sigma_mean = sigma_mean
+        self.sigma_std  = sigma_std
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        img_np = np.array(img, dtype=np.uint8)
+        lab    = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        for ch in range(3):
+            mu  = lab[:, :, ch].mean()
+            std = lab[:, :, ch].std() + 1e-6
+            # Standardize, then apply jittered statistics
+            lab[:, :, ch] = (lab[:, :, ch] - mu) / std
+            new_mu  = mu  + np.random.normal(0, self.sigma_mean * std)
+            new_std = std * np.exp(np.random.normal(0, self.sigma_std))
+            lab[:, :, ch] = lab[:, :, ch] * new_std + new_mu
+        lab = np.clip(lab, 0, 255).astype(np.uint8)
+        return Image.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dataset
+# ─────────────────────────────────────────────────────────────────────────────
 
 class FocusAugMixDataset(Dataset):
     """
@@ -237,34 +273,62 @@ class LeukemiaDataModule(L.LightningDataModule):
         compactness: float = 10.0,
         paste_ratio: float = 0.25,
         image_size: int = 224,
+        use_robust_aug: bool = False,
+        stain_sigma_mean: float = 0.15,
+        stain_sigma_std: float = 0.10,
+        stain_aug_prob: float = 0.5,
     ):
         super().__init__()
-        self.data_dir = data_dir
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.aug_mode = aug_mode
-        self.aug_prob = aug_prob
-        self.n_segments = n_segments
-        self.compactness = compactness
-        self.paste_ratio = paste_ratio
-        self.image_size = image_size
+        self.data_dir         = data_dir
+        self.batch_size       = batch_size
+        self.num_workers      = num_workers
+        self.aug_mode         = aug_mode
+        self.aug_prob         = aug_prob
+        self.n_segments       = n_segments
+        self.compactness      = compactness
+        self.paste_ratio      = paste_ratio
+        self.image_size       = image_size
+        self.use_robust_aug   = use_robust_aug
+        self.stain_sigma_mean = stain_sigma_mean
+        self.stain_sigma_std  = stain_sigma_std
+        self.stain_aug_prob   = stain_aug_prob
         self.save_hyperparameters()
 
-        # Stain-aware augmentation: simulate cross-domain color variation
-        # Increased jitter + hue + blur to reduce staining artefact reliance
-        self.train_transform = transforms.Compose([
-            transforms.Resize((image_size, image_size), antialias=True),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            transforms.RandomRotation(20),
-            transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25, hue=0.08),
-            transforms.RandomGrayscale(p=0.05),
-            transforms.RandomApply(
-                [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.2
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ])
+        if use_robust_aug:
+            # Robust pipeline for cross-domain generalisation:
+            #   - RandomRotation(180)   : cells have no canonical orientation
+            #   - RandomPerspective     : smear-prep deformation variation
+            #   - ReinhardJitter        : LAB-space stain variation across labs/batches
+            self.train_transform = transforms.Compose([
+                transforms.Resize((image_size, image_size), antialias=True),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.RandomRotation(180),
+                transforms.RandomPerspective(distortion_scale=0.1, p=0.3),
+                transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25, hue=0.08),
+                transforms.RandomApply([ReinhardJitter(sigma_mean=self.stain_sigma_mean, sigma_std=self.stain_sigma_std)], p=self.stain_aug_prob),
+                transforms.RandomGrayscale(p=0.05),
+                transforms.RandomApply(
+                    [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.2
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            ])
+        else:
+            # Standard pipeline (stain-aware jitter, used by all existing experiments)
+            self.train_transform = transforms.Compose([
+                transforms.Resize((image_size, image_size), antialias=True),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.RandomRotation(20),
+                transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25, hue=0.08),
+                transforms.RandomGrayscale(p=0.05),
+                transforms.RandomApply(
+                    [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.2
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            ])
         self.val_transform = transforms.Compose([
             transforms.Resize((image_size, image_size), antialias=True),
             transforms.ToTensor(),

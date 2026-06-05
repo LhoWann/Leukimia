@@ -566,6 +566,41 @@ Output berikut adalah hasil nyata dari eksperimen `baseline` pada `C-NMC_train_m
 
 Jika Macenko / Reinhard menutup sebagian besar gap, maka staining adalah faktor utama penurunan performa — bukan kualitas arsitektur.
 
+#### Gap Per-Kelas: Recall Abnormal vs Normal
+
+Selain gap keseluruhan, penting untuk melihat **asimetri recall per kelas**. Confusion matrix
+C-NMC menunjukkan dua pola berlawanan tergantung konfigurasi eksperimen:
+
+| Pola              | Eksperimen                               | Recall Abnormal | Recall Normal |
+| ----------------- | ---------------------------------------- | :-------------: | :-----------: |
+| Bias → Abnormal   | `baseline`, `mha_only`, `saliency_mix` | 93–100%         | 1–17%         |
+| Bias → Normal     | `focusmix_mha`, `focusmix_full`        | 7–28%           | 87–95%        |
+| Relatif seimbang  | `focusmix_v2`                           | 83%             | 50%           |
+
+**Penyebab bias ke Abnormal:**
+
+- Imbalance kelas training ALL-IDB (~2:1 Abnormal:Normal) mendorong model memilih Abnormal secara statistik.
+- Sel blast (Abnormal) memiliki ciri morfologi persisten lintas domain: inti besar, kromatin kasar,
+  rasio nukleus-sitoplasma tinggi — ciri ini relatif bertahan walau protokol pewarnaan berbeda.
+- Sel Normal (HEM/limfosit) lebih sensitif terhadap perubahan staining; fitur warna yang dipelajari
+  dari Giemsa ALL-IDB tidak cocok dengan tampilan HEM di Wright-Giemsa C-NMC.
+- Distribusi C-NMC yang tidak seimbang (68% ALL, 32% HEM) membuat model bias Abnormal tetap
+  terlihat "wajar" dari sisi accuracy keseluruhan meskipun recall Normal nyaris nol.
+
+**Penyebab bias ke Normal (eksperimen FocusAugMix+MHA):**
+
+- FocusAugMix mem-paste potongan superpixel antar gambar, menciptakan pola "tambal sulam" yang
+  tidak lazim. Model belajar mengasosiasikan penampilan tidak seragam itu dengan Abnormal —
+  tetapi di C-NMC, sel blast terlihat uniform dan bersih, sehingga salah diprediksi Normal.
+- MHA memperkuat *spatial attention patterns* yang sangat spesifik terhadap distribusi warna
+  Giemsa ALL-IDB. Ketika domain bergeser, pola atensi ini tidak lagi menemukan fitur yang
+  diharapkan, lalu kolaps ke prediksi Normal secara masif.
+
+**Catatan klinis:** Dalam konteks medis, False Negative Abnormal (sel leukemia yang diprediksi
+Normal) jauh lebih berbahaya dari False Positive. Akurasi keseluruhan yang terlihat baik bisa
+menyembunyikan recall Abnormal yang sangat rendah — selalu periksa confusion matrix dan F1 per
+kelas, bukan hanya accuracy agregat.
+
 ---
 
 ## Stain Normalization
@@ -919,4 +954,4 @@ EarlyStopping(monitor='val_loss', mode='min', patience=15),
 
 ---
 
-Last updated: 2026-05-30
+Last updated: 2026-06-05
