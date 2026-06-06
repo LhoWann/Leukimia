@@ -1,9 +1,11 @@
 __pycache__
 .venv
 checkpoints
+checkpoints_multiseed
 data
 dataset
 logs
+logs_multiseed
 PKG_C_NMC 2019
-results
 result
+results

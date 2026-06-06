@@ -13,21 +13,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchmetrics import Accuracy, F1Score, Precision, Recall
 
-# Model
-class ConvNeXtV2Classifier(nn.Module):
-    """
-    ConvNeXtV2-Tiny with optional Multi-Head Attention injection.
 
-    Args:
-        num_classes:    output classes
-        pretrained:     load FCMAE+IN22k+IN1k weights
-        use_mha:        inject MHA module after specified stage
-        mha_stage:      0..3 — which stage's output to attend over (3 = last)
-                        Stage 2 output is (B, 384, 14, 14) → 196 tokens (rich spatial)
-                        Stage 3 output is (B, 768,  7,  7) → 49 tokens (mostly global)
-        num_heads:      MHA heads
-    """
-    STAGE_DIMS = [96, 192, 384, 768]  # ConvNeXtV2-Tiny
+class ConvNeXtV2Classifier(nn.Module):
+    STAGE_DIMS = [96, 192, 384, 768]
 
     def __init__(
         self,
@@ -44,8 +32,6 @@ class ConvNeXtV2Classifier(nn.Module):
         self.use_mha = use_mha
         self.mha_stage = mha_stage
 
-        # features_only=True returns list of stage feature maps
-        # We use full model and hook MHA via forward override
         self.backbone = timm.create_model(
             'convnextv2_tiny.fcmae_ft_in22k_in1k',
             pretrained=pretrained,
@@ -54,7 +40,6 @@ class ConvNeXtV2Classifier(nn.Module):
             features_only=False,
         )
 
-        # Probe feature dimensions
         with torch.no_grad():
             x = torch.randn(1, 3, 224, 224)
             x = self.backbone.stem(x)
@@ -79,9 +64,8 @@ class ConvNeXtV2Classifier(nn.Module):
         self.classifier = nn.Linear(self.final_dim, num_classes)
 
     def _apply_mha(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply MHA to (B, C, H, W) feature map with residual + norm."""
         B, C, H, W = x.shape
-        tokens = x.flatten(2).transpose(1, 2)  # (B, HW, C)
+        tokens = x.flatten(2).transpose(1, 2)
         attn_out, _ = self.mha(tokens, tokens, tokens, need_weights=False)
         tokens = self.mha_norm(tokens + attn_out)
         return tokens.transpose(1, 2).view(B, C, H, W)
@@ -99,7 +83,7 @@ class ConvNeXtV2Classifier(nn.Module):
         pooled = self.pool(feat).flatten(1)
         return self.classifier(self.head_dropout(pooled))
 
-# Grad-CAM utility (cleanly separated)
+
 class GradCAMExtractor:
     def __init__(self, model: ConvNeXtV2Classifier, target_stage: int = 3):
         self.model = model
@@ -132,11 +116,6 @@ class GradCAMExtractor:
         x: torch.Tensor,
         target_class: Optional[torch.Tensor] = None,
     ) -> np.ndarray:
-        """
-        x:            (B, 3, H, W)
-        target_class: (B,) long — if None, uses argmax of predictions
-        Returns:      (B, H, W) float32 in [0, 1]
-        """
         self.model.zero_grad(set_to_none=True)
         logits = self.model(x)
         if target_class is None:
@@ -146,20 +125,16 @@ class GradCAMExtractor:
         one_hot.scatter_(1, target_class.unsqueeze(1), 1.0)
         logits.backward(gradient=one_hot, retain_graph=False)
 
-        # GAP over gradients → channel weights
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)
         cam = F.relu((weights * self.activations).sum(dim=1, keepdim=True))
         cam = F.interpolate(cam, size=x.shape[2:], mode='bilinear', align_corners=False)
 
         cam = cam.squeeze(1).detach().cpu().numpy()
-        # Normalize per-sample
         for i in range(cam.shape[0]):
             c_min, c_max = cam[i].min(), cam[i].max()
             cam[i] = (cam[i] - c_min) / (c_max - c_min) if c_max - c_min > 1e-8 else 0.0
         return cam.astype(np.float32)
-    
 
-# Layer-wise LR decay
 
 def build_param_groups(
     model: ConvNeXtV2Classifier,
@@ -167,33 +142,24 @@ def build_param_groups(
     weight_decay: float,
     llrd: float = 0.75,
 ):
-    """
-    Layer-wise LR decay: early stages get lower LR.
-    Head/MHA get base_lr; each stage further back gets base_lr * llrd^depth.
-    """
     groups = []
 
-    # Head and MHA — full LR
     head_params = list(model.classifier.parameters()) + list(model.head_dropout.parameters())
     if model.use_mha:
         head_params += list(model.mha.parameters()) + list(model.mha_norm.parameters())
     groups.append({'params': head_params, 'lr': base_lr, 'weight_decay': weight_decay})
 
-    # Backbone stages — decayed
     n_stages = len(model.backbone.stages)
     for i, stage in enumerate(model.backbone.stages):
-        depth = n_stages - i  # stage 0 is earliest (deepest decay)
+        depth = n_stages - i
         lr = base_lr * (llrd ** depth)
         groups.append({'params': list(stage.parameters()), 'lr': lr, 'weight_decay': weight_decay})
 
-    # Stem — deepest decay
     stem_lr = base_lr * (llrd ** (n_stages + 1))
     groups.append({'params': list(model.backbone.stem.parameters()), 'lr': stem_lr, 'weight_decay': weight_decay})
 
     return groups
 
-
-# Lightning module
 
 class LeukemiaLightningModel(L.LightningModule):
     def __init__(
@@ -207,9 +173,11 @@ class LeukemiaLightningModel(L.LightningModule):
         weight_decay: float = 0.05,
         llrd: float = 0.75,
         warmup_epochs: int = 5,
-        max_epochs: int = 50,
-        label_smoothing: float = 0.05,
+        max_epochs: int = 30,
+        label_smoothing: float = 0.0,
         class_weights: Optional[List[float]] = None,
+        use_focal_loss: bool = True,
+        focal_gamma: float = 2.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -237,6 +205,10 @@ class LeukemiaLightningModel(L.LightningModule):
     def forward(self, x):
         return self.model(x)
 
+    def _focal_weights(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = F.softmax(logits, dim=1)
+        return (1 - probs.gather(1, targets.unsqueeze(1)).squeeze(1)) ** self.hparams.focal_gamma
+
     def training_step(self, batch, batch_idx):
         images, targets_a, targets_b, lam = batch
         logits = self(images)
@@ -245,7 +217,13 @@ class LeukemiaLightningModel(L.LightningModule):
                                reduction='none', label_smoothing=self.label_smoothing)
         ce_b = F.cross_entropy(logits, targets_b, weight=self.class_weight_tensor,
                                reduction='none', label_smoothing=self.label_smoothing)
-        loss = (lam * ce_a + (1.0 - lam) * ce_b).mean()
+
+        if self.hparams.use_focal_loss:
+            fa = self._focal_weights(logits, targets_a)
+            fb = self._focal_weights(logits, targets_b)
+            loss = (lam * fa * ce_a + (1 - lam) * fb * ce_b).mean()
+        else:
+            loss = (lam * ce_a + (1 - lam) * ce_b).mean()
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
@@ -253,10 +231,16 @@ class LeukemiaLightningModel(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         images, labels = batch
         logits = self(images)
-        loss = F.cross_entropy(logits, labels, weight=self.class_weight_tensor,
-                               label_smoothing=self.label_smoothing)
-        preds = logits.argmax(dim=1)
 
+        if self.hparams.use_focal_loss:
+            ce = F.cross_entropy(logits, labels, weight=self.class_weight_tensor,
+                                 label_smoothing=self.label_smoothing, reduction='none')
+            loss = (self._focal_weights(logits, labels) * ce).mean()
+        else:
+            loss = F.cross_entropy(logits, labels, weight=self.class_weight_tensor,
+                                   label_smoothing=self.label_smoothing)
+
+        preds = logits.argmax(dim=1)
         self.val_acc(preds, labels)
         self.val_f1(preds, labels)
         self.val_prec(preds, labels)
@@ -275,7 +259,6 @@ class LeukemiaLightningModel(L.LightningModule):
         )
         optimizer = optim.AdamW(param_groups)
 
-        # Linear warmup → cosine decay
         warmup_steps = self.hparams.warmup_epochs
         total_steps = self.hparams.max_epochs
 

@@ -16,8 +16,6 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
-# Saliency (Spectral Residual, native resolution)
-
 def compute_saliency_map(image_np: np.ndarray) -> np.ndarray:
     if image_np.dtype != np.uint8:
         image_np = (image_np * 255).astype(np.uint8)
@@ -35,51 +33,29 @@ def compute_saliency_map(image_np: np.ndarray) -> np.ndarray:
     if s_max - s_min > 1e-8:
         sal = (sal - s_min) / (s_max - s_min)
     else:
-        # Uniform image → zero saliency signal, not ones
         sal = np.zeros_like(sal)
     return sal.astype(np.float32)
 
 
-# FocusAugMix variants
-
 def focus_aug_mix(
-    image_a_np: np.ndarray,           # target (HxWxC uint8)
-    image_b_np: np.ndarray,           # source (HxWxC uint8)
+    image_a_np: np.ndarray,
+    image_b_np: np.ndarray,
     gradcam_map: Optional[np.ndarray] = None,
     use_saliency: bool = True,
-    n_segments: int = 50,             # paper uses 50, not 100
+    n_segments: int = 50,
     compactness: float = 10.0,
-    paste_ratio: float = 0.25,        # fraction of segments to paste
+    paste_ratio: float = 0.25,
     saliency_weight: float = 0.6,
 ) -> Tuple[np.ndarray, float]:
-    """
-    OcCaMix-style superpixel paste guided by saliency and/or Grad-CAM.
-
-    Returns:
-        mixed: HxWxC uint8 — image_a with top superpixels from image_b pasted
-        lam:   fraction of pixels REMAINING from image_a (used for label mixing)
-
-    Mechanics:
-      1. SLIC on target (image_a) → defines paste regions following its contours
-      2. Saliency on source (image_b) → ranks which source content is informative
-      3. Top-K superpixels of target (by source saliency overlap) get replaced
-
-    NOTE: This deviates slightly from the paper's description but follows the
-    intent — paste informative SOURCE content into TARGET while respecting
-    TARGET cell contours. Reversing gives unstable training (cell from B placed
-    inside A's contour can break morphology).
-    """
     h, w = image_a_np.shape[:2]
     if image_b_np.shape[:2] != (h, w):
         image_b_np = cv2.resize(image_b_np, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    # SLIC on TARGET (preserve target contours)
     segments = slic(
         image_a_np, n_segments=n_segments, compactness=compactness,
         start_label=0, channel_axis=2,
     )
 
-    # Build score map: saliency from source + optional gradcam
     if use_saliency:
         score_map = compute_saliency_map(image_b_np)
     else:
@@ -93,7 +69,6 @@ def focus_aug_mix(
         else:
             score_map = gradcam_map.astype(np.float32)
 
-    # Rank target superpixels by mean score (high score = high source info there)
     seg_ids = np.unique(segments)
     seg_scores = np.array([score_map[segments == s].mean() for s in seg_ids])
     order = np.argsort(seg_scores)[::-1]
@@ -101,12 +76,10 @@ def focus_aug_mix(
     num_paste = max(1, int(len(seg_ids) * paste_ratio))
     paste_ids = seg_ids[order[:num_paste]]
 
-    # Build paste mask
     paste_mask = np.isin(segments, paste_ids)
     mixed = image_a_np.copy()
     mixed[paste_mask] = image_b_np[paste_mask]
 
-    # Lambda = fraction of pixels remaining from A (target)
     lam = 1.0 - paste_mask.mean()
     return mixed, float(lam)
 
@@ -116,10 +89,6 @@ def saliency_mix(
     image_b_np: np.ndarray,
     patch_ratio: float = 0.25,
 ) -> Tuple[np.ndarray, float]:
-    """
-    Classic SaliencyMix (Uddin et al. 2021): rectangular patch from B → A,
-    centered at peak saliency of B.
-    """
     h, w = image_a_np.shape[:2]
     if image_b_np.shape[:2] != (h, w):
         image_b_np = cv2.resize(image_b_np, (w, h), interpolation=cv2.INTER_LINEAR)
@@ -138,21 +107,7 @@ def saliency_mix(
     return mixed, float(lam)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stain augmentation
-# ─────────────────────────────────────────────────────────────────────────────
-
 class ReinhardJitter:
-    """
-    Simulates inter-lab staining variation by randomly perturbing per-channel
-    LAB color statistics. Mirrors what different stain batches or microscope
-    settings do in practice, encouraging the model to learn stain-invariant
-    morphology features.
-
-    Works on PIL Images (apply before ToTensor in the transform pipeline).
-    sigma_mean: controls shift of channel mean (relative to channel std)
-    sigma_std:  controls log-scale perturbation of channel std
-    """
     def __init__(self, sigma_mean: float = 0.15, sigma_std: float = 0.10):
         self.sigma_mean = sigma_mean
         self.sigma_std  = sigma_std
@@ -163,7 +118,6 @@ class ReinhardJitter:
         for ch in range(3):
             mu  = lab[:, :, ch].mean()
             std = lab[:, :, ch].std() + 1e-6
-            # Standardize, then apply jittered statistics
             lab[:, :, ch] = (lab[:, :, ch] - mu) / std
             new_mu  = mu  + np.random.normal(0, self.sigma_mean * std)
             new_std = std * np.exp(np.random.normal(0, self.sigma_std))
@@ -172,18 +126,7 @@ class ReinhardJitter:
         return Image.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Dataset
-# ─────────────────────────────────────────────────────────────────────────────
-
 class FocusAugMixDataset(Dataset):
-    """
-    Augmentation strategies (set via `aug_mode`):
-      - 'none'       : no mixing, just standard transforms
-      - 'saliency'   : SaliencyMix (rectangular patch)
-      - 'focusmix'   : OcCaMix + saliency (paper V2)
-      - 'focusmix_cam' : OcCaMix + saliency + Grad-CAM (paper V4)
-    """
     def __init__(
         self,
         root_dir: str,
@@ -204,10 +147,9 @@ class FocusAugMixDataset(Dataset):
         self.paste_ratio = paste_ratio
         self.classes = self.dataset.classes
         self.class_to_idx = self.dataset.class_to_idx
-        self.gradcam_maps = {}  # {idx: HxW float32 map in [0,1]}
+        self.gradcam_maps = {}
 
     def set_gradcam_maps(self, maps: dict):
-        """Call this between epochs when using 'focusmix_cam' mode."""
         self.gradcam_maps = maps
 
     def __len__(self):
@@ -259,8 +201,6 @@ def focusaugmix_collate_fn(batch):
     return images, targets_a, targets_b, lam
 
 
-# Lightning DataModule
-
 class LeukemiaDataModule(L.LightningDataModule):
     def __init__(
         self,
@@ -295,10 +235,6 @@ class LeukemiaDataModule(L.LightningDataModule):
         self.save_hyperparameters()
 
         if use_robust_aug:
-            # Robust pipeline for cross-domain generalisation:
-            #   - RandomRotation(180)   : cells have no canonical orientation
-            #   - RandomPerspective     : smear-prep deformation variation
-            #   - ReinhardJitter        : LAB-space stain variation across labs/batches
             self.train_transform = transforms.Compose([
                 transforms.Resize((image_size, image_size), antialias=True),
                 transforms.RandomHorizontalFlip(),
@@ -315,7 +251,6 @@ class LeukemiaDataModule(L.LightningDataModule):
                 transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
             ])
         else:
-            # Standard pipeline (stain-aware jitter, used by all existing experiments)
             self.train_transform = transforms.Compose([
                 transforms.Resize((image_size, image_size), antialias=True),
                 transforms.RandomHorizontalFlip(),
@@ -329,6 +264,7 @@ class LeukemiaDataModule(L.LightningDataModule):
                 transforms.ToTensor(),
                 transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
             ])
+
         self.val_transform = transforms.Compose([
             transforms.Resize((image_size, image_size), antialias=True),
             transforms.ToTensor(),
@@ -358,14 +294,12 @@ class LeukemiaDataModule(L.LightningDataModule):
         self.num_classes = len(self.classes)
 
     def get_class_weights(self) -> torch.Tensor:
-        """Inverse-frequency class weights from training labels."""
         targets = torch.tensor(self.train_dataset.dataset.targets)
         counts = torch.bincount(targets)
         weights = targets.numel() / (len(counts) * counts.float())
         return weights
 
     def train_dataloader(self):
-        # focusmix_cam maps live in main process; DataLoader workers can't see them
         n_workers = 0 if self.aug_mode == 'focusmix_cam' else self.num_workers
         return DataLoader(
             self.train_dataset,
@@ -388,42 +322,19 @@ class LeukemiaDataModule(L.LightningDataModule):
             persistent_workers=self.num_workers > 0,
         )
 
-    # ── External test dataloader (C-NMC or any ImageFolder-compatible dir) ──
-
     def external_test_dataloader(
         self,
         test_dir: str,
         normalizer=None,
         num_workers: Optional[int] = None,
     ) -> DataLoader:
-        """
-        Build a DataLoader for an external test directory.
-
-        Parameters
-        ----------
-        test_dir    : path with class subdirectories (ImageFolder compatible)
-                      OR C-NMC layout (all/ hem/).  Auto-detected.
-        normalizer  : MacenkoNormalizer | ReinhardNormalizer | None
-        num_workers : override self.num_workers (use 0 when normalizer is set,
-                      as normalizer objects are not picklable)
-
-        Returns a DataLoader yielding (images, labels) compatible with
-        standard validation/test loops.
-        """
-        from stain_normalize import MacenkoNormalizer, ReinhardNormalizer  # lazy import
-
-        # C-NMC class-name aliases → ImageFolder class names used in this project
         CNMC_ALIAS: Dict[str, str] = {
             'all': 'Abnormal', 'ALL': 'Abnormal',
             'hem': 'Normal',   'HEM': 'Normal',
         }
 
         test_path = os.path.abspath(test_dir)
-        subdirs   = [d for d in os.listdir(test_path)
-                     if os.path.isdir(os.path.join(test_path, d))]
 
-        # Rename C-NMC subdirs conceptually by building a custom dataset
-        # instead of relying on ImageFolder, so we handle arbitrary layouts.
         class _ExternalDataset(Dataset):
             def __init__(self_, root, cls_map, transform, normalizer_):
                 exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
@@ -434,7 +345,7 @@ class LeukemiaDataModule(L.LightningDataModule):
                     full_subdir = os.path.join(root, subdir)
                     if not os.path.isdir(full_subdir):
                         continue
-                    canonical = cls_map.get(subdir, subdir)   # pass-through if already canonical
+                    canonical = cls_map.get(subdir, subdir)
                     label     = self.class_to_idx.get(canonical)
                     if label is None:
                         continue
@@ -459,7 +370,7 @@ class LeukemiaDataModule(L.LightningDataModule):
                         pass
                 return self_.transform(img), label
 
-        cls_map = {**CNMC_ALIAS}   # can extend if needed
+        cls_map = {**CNMC_ALIAS}
         dataset = _ExternalDataset(
             root        = test_path,
             cls_map     = cls_map,

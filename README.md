@@ -38,9 +38,20 @@ dan bergantung pada keahlian patologis.
 Proyek ini mengimplementasikan sistem klasifikasi otomatis berbasis:
 
 - **ConvNeXt V2 Tiny** — backbone pretrained FCMAE + IN22k + IN1k (28.5 M params)
-- **Multi-Head Self-Attention** — injeksi perhatian spasial setelah stage backbone
+- **Multi-Head Self-Attention** — injeksi perhatian spasial setelah stage backbone (opsional; terbukti
+  memperburuk generalisasi lintas-domain pada dataset kecil ini, lihat [experiment_results.md](experiment_results.md))
 - **FocusAugMix** — mixing augmentation berbasis SLIC superpixel + saliency + Grad-CAM
-- **Stain Normalization** — Macenko & Reinhard untuk evaluasi lintas-domain
+- **ReinhardJitter (train-time stain augmentation)** — randomisasi statistik warna LAB saat training;
+  **kontribusi utama** yang menghasilkan model paling robust lintas-domain (`focusmix_stain`)
+- **Weighted Focal Loss** — Focal Loss (γ=2.0) + inverse-frequency class weights untuk menangani imbalance
+- **Stain Normalization** — Macenko & Reinhard untuk evaluasi lintas-domain (test-time)
+
+> **Ringkasan temuan (divalidasi 3 seed):** kontribusi utama adalah **`focusmix_stain`** (FocusAugMix +
+> ReinhardJitter σ=0.15, tanpa MHA). Pada single-seed ia mencapai F1 lintas-domain 0.635, tetapi setelah
+> validasi **3 seed (42/123/2025)** rata-ratanya **0.5535 ± 0.1189** — secara statistik setara dengan
+> baseline `no_mix` (0.5636 ± 0.0817). Pembeda nyata stain aug adalah **keseimbangan recall** (Abn/Norm
+> 48%/76% vs `focusmix` murni yang kolaps 13%/95%), bukan F1 absolut, dan dicapai **tanpa normalisasi
+> test-time**. Detail lengkap + ablation TTA-8 di [experiment_results.md](experiment_results.md).
 
 ---
 
@@ -93,6 +104,37 @@ Gambar A (target) + Gambar B (source)
 
 Mode augmentasi: `none` | `saliency` | `focusmix` | `focusmix_cam`
 
+### Train-Time Stain Augmentation: ReinhardJitter
+
+Selain mixing, tersedia augmentasi warna khusus untuk mensimulasikan variasi protokol pewarnaan
+antar-laboratorium. `ReinhardJitter` (di `src/data_module.py`) bekerja di ruang CIELAB: per channel,
+nilai di-z-score lalu di-rescale dengan mean & std yang di-perturbasi secara acak.
+
+```text
+Untuk tiap channel L, A, B:
+  z        = (pixel − μ) / σ
+  μ_baru   = μ + N(0, σ_mean · σ)          # geser mean warna
+  σ_baru   = σ · exp(N(0, σ_std))          # skala kontras warna
+  pixel    = z · σ_baru + μ_baru
+```
+
+Diaktifkan via `use_robust_aug=True` dengan parameter `stain_sigma_mean`, `stain_sigma_std`, dan
+`stain_aug_prob`. Intensitas σ_mean=0.15 (moderat) terbukti optimal; lebih agresif justru menurunkan
+robustness (hubungan non-monoton — lihat [experiment_results.md](experiment_results.md)).
+
+### Loss Function: Weighted Focal Loss
+
+Kedua kelas ditangani dengan **Weighted Focal Loss** (`use_focal_loss=True`, default):
+
+```text
+FL = (1 − p_t)^γ · CE(logits, target, weight=class_weights)
+γ  = 2.0
+class_weights = inverse-frequency dari train set (otomatis, src/data_module.py:get_class_weights)
+```
+
+Loss diterapkan kompatibel dengan label mixing FocusAugMix:
+`loss = λ·FL(target_a) + (1−λ)·FL(target_b)`, di mana λ adalah bobot mixing per-sampel.
+
 ### Arsitektur Model
 
 ```text
@@ -124,15 +166,18 @@ AdaptiveAvgPool2d(1) -> Flatten -> Dropout(0.3) -> Linear(num_classes)
 | Stage 0    | 0.32 x base_lr |
 | Stem       | 0.24 x base_lr |
 
-**Optimizer:** AdamW + Linear Warmup (5 epoch) + Cosine Decay
+**Optimizer:** AdamW + Linear Warmup (3 epoch default; 5 untuk eksperimen MHA) + Cosine Decay
+sepanjang `max_epochs=30`.
 
 **Trainer settings:**
 
-| Setting             | Nilai         | Keterangan                                   |
-| ------------------- | ------------- | -------------------------------------------- |
-| `precision`       | `bf16-mixed`  | ~1.8x speedup pada GPU Ampere+               |
-| `gradient_clip_val` | 1.0         | Mencegah exploding gradient saat fine-tuning |
-| `log_every_n_steps` | 10          | Frekuensi logging ke CSV                     |
+| Setting             | Nilai         | Keterangan                                       |
+| ------------------- | ------------- | ------------------------------------------------ |
+| `precision`         | `bf16-mixed`  | ~1.8x speedup pada GPU Ampere+                   |
+| `gradient_clip_val` | 1.0           | Mencegah exploding gradient saat fine-tuning     |
+| `log_every_n_steps` | 10            | Frekuensi logging ke CSV                          |
+| `max_epochs`        | 30            | Early stopping `val_loss` aktif (patience 10)    |
+| Checkpoint monitor  | `val_f1`      | Bukan `val_acc` — val_acc jenuh 100% sejak awal  |
 
 **Class index mapping** (ditentukan oleh urutan alfabet folder ImageFolder):
 
@@ -171,16 +216,16 @@ LEUKIMIA/
 |       +-- Normal/             # ~93 sel normal
 |
 +-- checkpoints/                # Tersimpan otomatis saat training
-|   +-- baseline/
-|   |   +-- epoch=XX-val_acc=1.0000.ckpt
+|   +-- focusmix_stain/
+|   |   +-- epoch=XX-val_f1=1.0000.ckpt
 |   |   +-- last.ckpt
-|   +-- mha_only/ ...
+|   +-- no_mix/ ...
 |
 +-- logs/                       # CSV metrics
-|   +-- baseline/version_0/metrics.csv
-|   +-- mha_only/version_0/metrics.csv
+|   +-- no_mix/version_0/metrics.csv
+|   +-- focusmix_stain/version_0/metrics.csv
 |
-+-- result/                     # JSON output evaluasi eksternal
++-- results/                    # JSON output evaluasi eksternal (per-exp + summary.json)
 +-- requirements.txt
 +-- README.md
 ```
@@ -302,19 +347,22 @@ cd src
 #### Jalankan Satu Eksperimen
 
 ```bash
-# Eksperimen yang direkomendasikan
-python main.py --exp focusmix_mha
+# Eksperimen terbaik / proposal utama
+python main.py --exp focusmix_stain
 
 # Eksperimen lain
-python main.py --exp baseline
-python main.py --exp mha_only
-python main.py --exp saliency_mix
-python main.py --exp focusmix_v2
-python main.py --exp focusmix_full
-python main.py --exp focusmix_aggressive
+python main.py --exp no_mix
+python main.py --exp no_mix_mha
+python main.py --exp saliency
+python main.py --exp focusmix
+python main.py --exp focusmix_mha
+python main.py --exp focusmix_mha_strong
+python main.py --exp focusmix_cam
+python main.py --exp focusmix_stain_strong
+python main.py --exp focusmix_stain_max
 
 # Dengan seed tertentu dan direktori data kustom
-python main.py --exp focusmix_mha --seed 123 --data-dir ../dataset
+python main.py --exp focusmix_stain --seed 123 --data-dir ../dataset
 ```
 
 #### Jalankan Semua Eksperimen Berurutan
@@ -323,7 +371,7 @@ python main.py --exp focusmix_mha --seed 123 --data-dir ../dataset
 python main.py --all
 ```
 
-Progress dan metrics ditampilkan real-time di terminal. Checkpoint terbaik (berdasarkan `val_acc`) disimpan otomatis.
+Progress dan metrics ditampilkan real-time di terminal. Checkpoint terbaik (berdasarkan `val_f1`) disimpan otomatis.
 
 ---
 
@@ -352,7 +400,7 @@ Plot training curve:
 import pandas as pd
 import matplotlib.pyplot as plt
 
-df = pd.read_csv('../logs/mha_only/version_0/metrics.csv')
+df = pd.read_csv('../logs/focusmix_stain/version_0/metrics.csv')
 
 train = df.dropna(subset=['train_loss_epoch'])
 val   = df.dropna(subset=['val_loss'])
@@ -410,7 +458,7 @@ import lightning as L
 from lightning_model import LeukemiaLightningModel
 from data_module import LeukemiaDataModule
 
-ckpt = '../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt'
+ckpt = '../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt'
 model = LeukemiaLightningModel.load_from_checkpoint(ckpt)
 
 dm = LeukemiaDataModule(data_dir='../dataset', batch_size=32)
@@ -467,10 +515,10 @@ python src/evaluate_external.py \
 cd src
 
 python evaluate_external.py \
-    --ckpt      ../checkpoints/mha_only/epoch=07-val_f1=1.0000.ckpt \
+    --ckpt      ../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt \
     --cnmc-dir  "../PKG_C_NMC 2019/C-NMC_train_merged" \
     --data-dir  ../dataset \
-    --output-json ../results/cnmc_eval_mha_only.json
+    --output-json ../results/cnmc_eval_focusmix_stain.json
 ```
 
 Script akan menjalankan **4 kondisi** secara berurutan:
@@ -503,14 +551,14 @@ Script akan menjalankan **4 kondisi** secara berurutan:
 cd src
 
 python evaluate_external.py \
-    --ckpt     ../checkpoints/mha_only/epoch=07-val_f1=1.0000.ckpt \
+    --ckpt     ../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt \
     --cnmc-dir "../PKG_C_NMC 2019/C-NMC_train_merged" \
     --no-macenko --no-reinhard
 ```
 
 #### Contoh Output
 
-Output berikut adalah hasil nyata dari eksperimen `baseline` pada `C-NMC_train_merged`
+Output berikut adalah hasil nyata dari eksperimen terbaik `focusmix_stain` pada `C-NMC_train_merged`
 (10.661 sel). Lihat analisis lengkap di [experiment_results.md](experiment_results.md).
 
 ```text
@@ -525,22 +573,22 @@ Output berikut adalah hasil nyata dari eksperimen `baseline` pada `C-NMC_train_m
   C-NMC 2019  .  No Stain Normalization
 ────────────────────────────────────────────────────────────
   N samples  : 10661
-  Accuracy   : 0.6904  (69.0%)
-  F1 (macro) : 0.5289
+  Accuracy   : 0.6581  (65.8%)
+  F1 (macro) : 0.6351
 
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  Macenko Normalization
 ────────────────────────────────────────────────────────────
   N samples  : 10661
-  Accuracy   : 0.6537  (65.4%)
-  F1 (macro) : 0.4864
+  Accuracy   : 0.7057  (70.6%)
+  F1 (macro) : 0.6225
 
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  Reinhard Normalization
 ────────────────────────────────────────────────────────────
   N samples  : 10661
-  Accuracy   : 0.7035  (70.4%)
-  F1 (macro) : 0.5101
+  Accuracy   : 0.5606  (56.1%)
+  F1 (macro) : 0.5559
 
 ════════════════════════════════════════════════════════════
   SUMMARY
@@ -548,12 +596,12 @@ Output berikut adalah hasil nyata dari eksperimen `baseline` pada `C-NMC_train_m
   Condition                                 Acc    F1
   ──────────────────────────────────────── ────── ──────
   ALL-IDB val (in-domain)                 1.0000 1.0000
-  C-NMC -- no normalization               0.6904 0.5289
-  C-NMC -- Macenko                        0.6537 0.4864
-  C-NMC -- Reinhard                       0.7035 0.5101
+  C-NMC -- no normalization               0.6581 0.6351
+  C-NMC -- Macenko                        0.7057 0.6225
+  C-NMC -- Reinhard                       0.5606 0.5559
 
-  Domain-shift gap (val_acc - raw_acc) : +0.3096
-  WARNING: Large gap -- model likely relies on staining artefacts.
+  Optimal threshold (calibrated on no-norm, class=Normal): 0.55
+  Domain-shift gap (val_acc - raw_acc) : +0.3419
 ```
 
 #### Interpretasi Domain-Shift Gap
@@ -564,37 +612,42 @@ Output berikut adalah hasil nyata dari eksperimen `baseline` pada `C-NMC_train_m
 | 0.05-0.10 | Ketergantungan staining moderat                                         |
 | > 0.10    | Ketergantungan staining signifikan; normalisasi sangat direkomendasikan |
 
-Jika Macenko / Reinhard menutup sebagian besar gap, maka staining adalah faktor utama penurunan performa — bukan kualitas arsitektur.
+> **Catatan penting:** gap sendiri bisa menyesatkan pada data tidak seimbang. `saliency` punya gap
+> terkecil (0.291) tetapi recall Normal hanya 17% — model nyaris menebak "semua Abnormal". Selalu
+> baca gap **bersama** F1 macro dan recall per-kelas, bukan sendirian.
 
 #### Gap Per-Kelas: Recall Abnormal vs Normal
 
-Selain gap keseluruhan, penting untuk melihat **asimetri recall per kelas**. Confusion matrix
-C-NMC menunjukkan dua pola berlawanan tergantung konfigurasi eksperimen:
+Asimetri recall per kelas lebih informatif dari gap keseluruhan. Confusion matrix C-NMC (no-norm,
+threshold 0.5) menunjukkan tiga pola tergantung konfigurasi:
 
-| Pola              | Eksperimen                               | Recall Abnormal | Recall Normal |
-| ----------------- | ---------------------------------------- | :-------------: | :-----------: |
-| Bias → Abnormal   | `baseline`, `mha_only`, `saliency_mix` | 93–100%         | 1–17%         |
-| Bias → Normal     | `focusmix_mha`, `focusmix_full`        | 7–28%           | 87–95%        |
-| Relatif seimbang  | `focusmix_v2`                           | 83%             | 50%           |
+| Pola              | Eksperimen                                          | Recall Abnormal | Recall Normal |
+| ----------------- | --------------------------------------------------- | :-------------: | :-----------: |
+| Bias → Abnormal   | `no_mix`, `saliency`                                | 88–96%          | 17–22%        |
+| Bias → Normal     | `no_mix_mha`, `focusmix`, `focusmix_mha`, `_cam`    | 2–27%           | 79–99%        |
+| **Seimbang**      | **`focusmix_stain`**                                | **67%**         | **64%**       |
 
-**Penyebab bias ke Abnormal:**
+**Penyebab bias ke Abnormal (`no_mix`, `saliency`):**
 
 - Imbalance kelas training ALL-IDB (~2:1 Abnormal:Normal) mendorong model memilih Abnormal secara statistik.
 - Sel blast (Abnormal) memiliki ciri morfologi persisten lintas domain: inti besar, kromatin kasar,
   rasio nukleus-sitoplasma tinggi — ciri ini relatif bertahan walau protokol pewarnaan berbeda.
-- Sel Normal (HEM/limfosit) lebih sensitif terhadap perubahan staining; fitur warna yang dipelajari
-  dari Giemsa ALL-IDB tidak cocok dengan tampilan HEM di Wright-Giemsa C-NMC.
-- Distribusi C-NMC yang tidak seimbang (68% ALL, 32% HEM) membuat model bias Abnormal tetap
-  terlihat "wajar" dari sisi accuracy keseluruhan meskipun recall Normal nyaris nol.
+- Distribusi C-NMC (68% ALL, 32% HEM) membuat bias Abnormal terlihat "wajar" dari accuracy meski
+  recall Normal nyaris nol.
 
-**Penyebab bias ke Normal (eksperimen FocusAugMix+MHA):**
+**Penyebab bias ke Normal (eksperimen mixing/MHA tanpa stain aug):**
 
 - FocusAugMix mem-paste potongan superpixel antar gambar, menciptakan pola "tambal sulam" yang
-  tidak lazim. Model belajar mengasosiasikan penampilan tidak seragam itu dengan Abnormal —
-  tetapi di C-NMC, sel blast terlihat uniform dan bersih, sehingga salah diprediksi Normal.
-- MHA memperkuat *spatial attention patterns* yang sangat spesifik terhadap distribusi warna
-  Giemsa ALL-IDB. Ketika domain bergeser, pola atensi ini tidak lagi menemukan fitur yang
-  diharapkan, lalu kolaps ke prediksi Normal secara masif.
+  tidak lazim. Model mengasosiasikan penampilan tidak seragam itu dengan Abnormal — tetapi di C-NMC,
+  sel blast terlihat uniform dan bersih, sehingga salah diprediksi Normal.
+- MHA memperkuat *spatial attention pattern* yang spesifik terhadap distribusi warna Giemsa ALL-IDB.
+  Saat domain bergeser, pola atensi ini kolaps ke prediksi Normal secara masif.
+
+**Mengapa `focusmix_stain` seimbang:**
+
+- ReinhardJitter saat training memaksa model invariant terhadap pergeseran statistik warna, sehingga
+  ia mengandalkan morfologi sel (yang lintas-domain) alih-alih warna (yang domain-spesifik). Hasilnya
+  recall kedua kelas seimbang **tanpa** normalisasi test-time.
 
 **Catatan klinis:** Dalam konteks medis, False Negative Abnormal (sel leukemia yang diprediksi
 Normal) jauh lebih berbahaya dari False Positive. Akurasi keseluruhan yang terlihat baik bisa
@@ -681,31 +734,68 @@ normalized_rh2 = rh2.transform(cnmc_np)
 
 ### Daftar Eksperimen
 
-| Eksperimen              | MHA | aug_mode         | aug_prob | paste_ratio | Tujuan                     |
-| ----------------------- | --- | ---------------- | -------- | ----------- | -------------------------- |
-| `baseline`            | No  | `none`         | 0.5      | 0.25        | Batas bawah performa       |
-| `mha_only`            | Yes | `none`         | 0.5      | 0.25        | Isolasi kontribusi MHA     |
-| `saliency_mix`        | No  | `saliency`     | 0.5      | 0.25        | SaliencyMix murni          |
-| `focusmix_v2`         | No  | `focusmix`     | 0.5      | 0.25        | OcCaMix + Saliency         |
-| `focusmix_mha`        | Yes | `focusmix`     | 0.5      | 0.25        | **Direkomendasikan** |
-| `focusmix_full`       | Yes | `focusmix_cam` | 0.5      | 0.25        | + Grad-CAM online          |
-| `focusmix_aggressive` | Yes | `focusmix`     | 0.7      | 0.35        | Dataset sangat kecil       |
+Sepuluh eksperimen terdaftar di `EXPERIMENTS` (`src/main.py`), membentuk ablation atas mixing, MHA,
+dan stain augmentation. **`focusmix_stain` adalah model terbaik / proposal utama.**
+
+| Eksperimen                | MHA | aug_mode       | Stain aug (σ_mean/prob) | F1 lintas-domain | Tujuan                          |
+| ------------------------- | --- | -------------- | ----------------------- | :--------------: | ------------------------------- |
+| `no_mix`                  | No  | `none`         | –                       | 0.540            | Baseline (augmentasi dasar)     |
+| `no_mix_mha`              | Yes | `none`         | –                       | 0.266            | Isolasi kontribusi MHA          |
+| `saliency`                | No  | `saliency`     | –                       | 0.546            | SaliencyMix murni               |
+| `focusmix`                | No  | `focusmix`     | –                       | 0.424            | FocusAugMix murni               |
+| `focusmix_mha`            | Yes | `focusmix`     | –                       | 0.338            | FocusAugMix + MHA               |
+| `focusmix_mha_strong`     | Yes | `focusmix`     | – (paste 0.30)          | 0.434            | FocusAugMix + MHA, paste besar  |
+| `focusmix_cam`            | Yes | `focusmix_cam` | –                       | 0.433            | + Grad-CAM online               |
+| **`focusmix_stain`**      | No  | `focusmix`     | 0.15 / 0.5              | **0.635**        | **Proposal — terbaik**          |
+| `focusmix_stain_strong`   | No  | `focusmix`     | 0.25 / 0.7              | 0.413            | Stain aug kuat                  |
+| `focusmix_stain_max`      | No  | `focusmix`     | 0.35 / 0.8              | 0.506            | Stain aug maksimal              |
+
+> Kolom "F1 lintas-domain" = F1 macro pada C-NMC no-norm, threshold 0.5, **single-seed (42)**. Tabel ini
+> adalah ablation lengkap. **Angka headline = mean ± std atas 3 seed** untuk tiga eksperimen kunci
+> (`no_mix` 0.5636 ± 0.0817, `focusmix_stain` 0.5535 ± 0.1189, `focusmix` 0.3486 ± 0.1405) — lihat
+> bagian "Validasi Multi-Seed" di [experiment_results.md](experiment_results.md).
+
+### Multi-Seed & Ablation TTA (otomatis)
+
+Tiga eksperimen kunci divalidasi dengan 3 seed (42/123/2025). Tooling:
+
+```bash
+# Latih + evaluasi 3 eksperimen kunci × 3 seed (no-TTA, headline)
+python src/run_multiseed.py
+
+# Ablation TTA-8 di checkpoint yang sudah ada (tanpa latih ulang)
+python src/run_multiseed.py --tta-n 8 --no-train --results-root results_multiseed_tta8
+
+# Agregasi mean ± std + tabel markdown
+python src/aggregate_seeds.py --results-dir results_multiseed
+python src/aggregate_seeds.py --results-dir results_multiseed_tta8
+```
+
+Output: `results_multiseed/aggregate.{json,md}` (no-TTA) dan `results_multiseed_tta8/aggregate.{json,md}`
+(ablation TTA-8). `aggregate_seeds.py` bersifat umum — file per-seed CoAtNet (`coatnet_0_seed<seed>.json`)
+di folder yang sama akan ikut teragregasi untuk tabel perbandingan.
 
 ### Hyperparameter Lengkap
 
-| Parameter           | Default | Deskripsi                                  |
-| ------------------- | ------- | ------------------------------------------ |
-| `batch_size`      | 32      | Turunkan ke 16 jika GPU OOM                |
-| `lr`              | 1e-4    | Base learning rate untuk head / MHA        |
-| `weight_decay`    | 0.05    | AdamW weight decay                         |
-| `llrd`            | 0.75    | Layer-wise LR decay factor per stage       |
-| `label_smoothing` | 0.05    | Label smoothing di CrossEntropy            |
-| `max_epochs`      | 7       | Maksimum epoch (early stopping aktif; cukup karena fine-tuning pretrained) |
-| `warmup_epochs`   | 5       | Epoch linear warmup sebelum cosine         |
-| `aug_prob`        | 0.5     | Probabilitas augmentasi per sampel         |
-| `paste_ratio`     | 0.25    | Fraksi superpixel yang di-paste            |
-| `n_segments`      | 50      | Jumlah superpixel SLIC                     |
-| `mha_stage`       | 2       | Stage backbone tempat MHA disisipkan (0-3) |
+| Parameter            | Default | Deskripsi                                            |
+| -------------------- | ------- | ---------------------------------------------------- |
+| `batch_size`         | 32      | Turunkan ke 16 jika GPU OOM                          |
+| `lr`                 | 1e-4    | Base learning rate untuk head / MHA                  |
+| `weight_decay`       | 0.05    | AdamW weight decay                                   |
+| `llrd`               | 0.75    | Layer-wise LR decay factor per stage                 |
+| `label_smoothing`    | 0.0     | Label smoothing di CrossEntropy (default nonaktif)   |
+| `use_focal_loss`     | True    | Aktifkan Weighted Focal Loss                         |
+| `focal_gamma`        | 2.0     | Faktor fokus Focal Loss                              |
+| `max_epochs`         | 30      | Maksimum epoch (early stopping `val_loss` patience 10)|
+| `warmup_epochs`      | 3       | Epoch linear warmup (5 untuk eksperimen MHA)         |
+| `aug_prob`           | 0.5     | Probabilitas augmentasi mixing per sampel            |
+| `paste_ratio`        | 0.25    | Fraksi superpixel yang di-paste                      |
+| `n_segments`         | 50      | Jumlah superpixel SLIC                               |
+| `mha_stage`          | 2       | Stage backbone tempat MHA disisipkan (0-3)           |
+| `use_robust_aug`     | False   | Aktifkan ReinhardJitter + augmentasi geometrik kuat  |
+| `stain_sigma_mean`   | 0.15    | Std perturbasi mean warna LAB (ReinhardJitter)       |
+| `stain_sigma_std`    | 0.10    | Std perturbasi kontras warna LAB                     |
+| `stain_aug_prob`     | 0.5     | Probabilitas penerapan ReinhardJitter per sampel     |
 
 ### Menambah Eksperimen Baru
 
@@ -743,7 +833,7 @@ from PIL import Image
 
 # Load model
 model = LeukemiaLightningModel.load_from_checkpoint(
-    '../checkpoints/mha_only/epoch=06-val_acc=1.0000.ckpt',
+    '../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt',
     map_location='cuda',
 )
 model.eval()
@@ -791,7 +881,7 @@ Edit `trainer.fit()` di `src/main.py`:
 trainer.fit(
     model,
     datamodule=datamodule,
-    ckpt_path='../checkpoints/mha_only/last.ckpt',  # tambahkan ini
+    ckpt_path='../checkpoints/focusmix_stain/last.ckpt',  # tambahkan ini
 )
 ```
 
@@ -846,11 +936,11 @@ self.model.backbone.set_grad_checkpointing(True)
 # Kurangi DataLoader workers jika CPU bottleneck
 # Di LeukemiaDataModule: num_workers=8 (default)
 
-# Hindari focusmix_full (Grad-CAM online paling lambat)
-python main.py --exp focusmix_mha   # lebih cepat dari focusmix_full
+# Hindari focusmix_cam (Grad-CAM online paling lambat; num_workers dipaksa 0)
+python main.py --exp focusmix_stain   # jauh lebih cepat dari focusmix_cam
 
-# Matikan SLIC untuk cek overhead augmentasi
-python main.py --exp mha_only
+# Matikan SLIC/mixing untuk cek overhead augmentasi
+python main.py --exp no_mix
 ```
 
 ### Segmentation Error `*.xyc not found`
@@ -865,7 +955,7 @@ ls data/ALL_IDB1/xyc/ | head -5
 ```bash
 # Jalankan dengan num_workers=0 (normalizer tidak picklable lintas proses)
 python evaluate_external.py \
-    --ckpt ../checkpoints/mha_only/epoch=07-val_f1=1.0000.ckpt \
+    --ckpt ../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt \
     --cnmc-dir "../PKG_C_NMC 2019/C-NMC_train_merged" \
     --num-workers 0
 
@@ -954,4 +1044,4 @@ EarlyStopping(monitor='val_loss', mode='min', patience=15),
 
 ---
 
-Last updated: 2026-06-05
+Last updated: 2026-06-07
