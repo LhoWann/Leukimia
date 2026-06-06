@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from skimage.util import img_as_float
+import random
 
 def spectral_residual_saliency(img_bgr: np.ndarray) -> np.ndarray:
     gray     = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
@@ -28,3 +29,20 @@ def focus_augmix(img_bgr: np.ndarray, n_segments: int = 50, alpha: float = 0.5) 
             noise         = np.random.normal(0, 15, result[mask].shape)
             result[mask]  = np.clip(result[mask] + noise * alpha, 0, 255)
     return result.astype(np.uint8)
+
+def split_by_source(image_paths: list[str], train_ratio: float = TRAIN_RATIO,
+                    seed: int = SEED) -> tuple[list[str], list[str]]:
+    source_groups = defaultdict(list)
+    for path in image_paths:
+        filename   = os.path.splitext(os.path.basename(path))[0]
+        source_key = filename.rsplit('_', 1)[0]
+        source_groups[source_key].append(path)
+    sources = list(source_groups.keys())
+    random.seed(seed)
+    random.shuffle(sources)
+    split_idx  = int(len(sources) * train_ratio)
+    train_srcs = sources[:split_idx]
+    val_srcs   = sources[split_idx:]
+    train_paths = [p for s in train_srcs for p in source_groups[s]]
+    val_paths   = [p for s in val_srcs   for p in source_groups[s]]
+    return train_paths, val_paths
