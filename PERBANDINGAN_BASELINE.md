@@ -313,13 +313,22 @@ Ini target tabel yang akan masuk ke paper. **Semua angka = no-TTA, mean ± std a
 
 | Model                                | Val F1 | No-Norm F1 (mean±std) | Reinhard F1 (mean±std) | Recall Abn | Recall Norm | Gap           |
 | ------------------------------------ | :----: | :-------------------: | :--------------------: | :--------: | :---------: | :-----------: |
-| CoAtNet-0 + CutMix+Mixup (Baseline)  | _TBD_  | _TBD_                 | _TBD_                  | _TBD_      | _TBD_       | _TBD_         |
+| CoAtNet-0 + CutMix+Mixup (Baseline)  | 1.000  | 0.4185 ± 0.0223       | 0.4063 ± 0.0004        | 95.1%      | 3.2%        | 0.341 ± 0.038 |
+| ConvNeXtV2-Tiny `no_mix` (Baseline)  | 1.000  | 0.5636 ± 0.0817       | 0.4710 ± 0.0557        | 68.4%      | 52.5%       | 0.366 ± 0.080 |
 | ConvNeXtV2-Tiny + FocusAugMix (Ours) | 1.000  | **0.5535 ± 0.1189**   | 0.5187 ± 0.0500        | 48.4%      | 75.5%       | 0.430 ± 0.130 |
 
 > **Ours = `focusmix_stain`** (FocusAugMix + ReinhardJitter σ=0.15, tanpa MHA), **3 seed (42/123/2025),
-> no-TTA**, sumber `results_multiseed/aggregate.json`. Recall Abn/Norm pada kondisi headline **no_norm**.
-> Pembanding baseline ConvNeXtV2 tanpa stain aug = `no_mix` (no-norm F1 **0.5636 ± 0.0817**) — keduanya
-> setara secara statistik; pembeda `focusmix_stain` ada di keseimbangan recall (lihat catatan di bawah).
+> no-TTA**, sumber `results_comparison/aggregate.json` (gabungan `results_multiseed/` + `results_coatnet/`).
+> Recall Abn/Norm pada kondisi headline **no_norm**.
+>
+> **Temuan utama vs baseline CoAtNet-0** (F1 no-norm 0.4185 ± 0.022, sumber `results_coatnet/aggregate.json`):
+> CoAtNet **kolaps ke bias-Abnormal** (recall Normal hanya **3.2%**) dan **tetap kolaps walau diberi
+> Reinhard test-time** (99.9%/0.1%, F1 0.406) — normalisasi warna tidak menyelamatkannya. Sebaliknya
+> ConvNeXtV2 + FocusAugMix + stain-aug mencapai **recall seimbang (48%/76%) tanpa normalisasi test-time**.
+> Inilah bukti utama klaim *stain-/specimen-robust*: keunggulan bukan pada F1 absolut semata, tetapi pada
+> **keseimbangan recall lintas-domain** yang gagal dicapai baik baseline CoAtNet maupun augmentasi mixing
+> non-stain. Pembanding intra-arsitektur ConvNeXtV2 `no_mix` (0.5636 ± 0.0817) setara F1 dengan Ours,
+> sehingga peran **stain-aug** terlihat justru di **balance recall**, bukan F1.
 
 Aturan tabel utama:
 
@@ -329,15 +338,17 @@ Aturan tabel utama:
   angka headline, tapi tampilkan keduanya agar transparan.
 - **Setting identik untuk kedua model** — kalau Ours dilaporkan no-TTA, CoAtNet juga no-TTA.
 
-### Tabel Ablation TTA (terpisah, hanya model terbaik)
+### Tabel Ablation TTA (terpisah)
 
-Untuk menunjukkan TTA bukan faktor utama, sajikan ablation pada **model terbaik masing-masing** saja:
+TTA-8 (full dihedral, 8 views) hanya untuk menunjukkan TTA **bukan** faktor utama. Dampak pada F1 no-norm
+dapat diabaikan untuk **kedua** model — argumen kuat model bekerja baik tanpa overhead 8× di inference.
 
-| Config | No-Norm F1 | Catatan                          |
-| ------ | :--------: | -------------------------------- |
-| no-TTA |            | angka headline                   |
-| TTA-4  |            | original + 3 flip/rotasi         |
-| TTA-8  |            | full dihedral (8 views)          |
+| Model                       | No-Norm F1 (no-TTA) | No-Norm F1 (TTA-8) | Δ        |
+| --------------------------- | :-----------------: | :----------------: | :------: |
+| `focusmix_stain` (Ours)     | 0.5535 ± 0.1189     | 0.5578 ± 0.1274    | +0.0043  |
+| CoAtNet-0 (baseline)        | 0.4185 ± 0.0223     | 0.4147 ± 0.0157    | −0.0038  |
+
+Sumber: `results_multiseed_tta8/aggregate.json` & `results_coatnet_tta8/aggregate.json`.
 
 ### Angka Referensi Model "Ours" (FINAL — multi-seed)
 
@@ -357,14 +368,16 @@ Model proposal **`focusmix_stain`** (FocusAugMix + ReinhardJitter σ=0.15, tanpa
 > normalisasi test-time**, bukan superioritas F1 absolut. **Ablation TTA-8** (`results_multiseed_tta8/`)
 > hanya menggeser F1 ≤ 0.005 → bukti TTA bukan faktor utama.
 
-> **Temuan penting untuk fair comparison.** Berbeda dari asumsi di Bagian 2.5, model proposal yang
-> sudah dilatih dengan train-time stain augmentation **paling baik pada kondisi `no_norm`** — Reinhard
-> test-time justru **menurunkan** F1 (0.635 → 0.556) karena terjadi koreksi warna ganda. Sebaliknya,
-> baseline CoAtNet (tanpa stain augmentation training) kemungkinan besar **butuh** Reinhard untuk
-> menyeimbangkan prediksi. Karena itu **laporkan kedua kondisi untuk kedua model** dan pilih kondisi
-> terbaik per model sebagai angka headline; kondisi terbaik yang berbeda inilah salah satu kontribusi
-> yang ditonjolkan (train-time vs test-time stain handling). Angka di atas no-TTA — TTA-8 hanya
-> diharapkan menaikkan sedikit dan masuk tabel ablation, bukan headline.
+> **Temuan penting untuk fair comparison (DIVALIDASI dengan hasil CoAtNet).** Berbeda dari asumsi di
+> Bagian 2.5, model proposal yang sudah dilatih dengan train-time stain augmentation **paling baik pada
+> kondisi `no_norm`** — Reinhard test-time justru **menurunkan** F1 (0.635 → 0.556) karena koreksi warna
+> ganda. **Dugaan lama bahwa baseline CoAtNet "butuh" Reinhard ternyata SALAH:** CoAtNet-0 tetap kolaps
+> ke bias-Abnormal pada **semua** kondisi normalisasi (no-norm 95.1%/3.2%, Reinhard 99.9%/0.1%) — F1 nyaris
+> tak berubah (0.4185 → 0.4063). Artinya normalisasi test-time **tidak** memperbaiki ketidakseimbangan
+> yang berasal dari arsitektur + augmentasi non-stain; hanya **train-time stain augmentation** yang
+> menyeimbangkan recall. Tetap **laporkan kedua kondisi untuk kedua model** demi transparansi, tetapi
+> kesimpulannya: keunggulan Ours adalah *train-time stain handling*, bukan sekadar pilihan normalisasi
+> test-time. Angka di atas no-TTA — TTA-8 hanya menggeser sedikit dan masuk tabel ablation, bukan headline.
 
 ---
 

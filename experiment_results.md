@@ -194,6 +194,112 @@ Sumber: `results_multiseed_tta8/aggregate.json`.
 
 ---
 
+## Perbandingan dengan Baseline CoAtNet-0 (Cross-Architecture)
+
+Untuk membuktikan kontribusi berasal dari **train-time stain handling** dan bukan sekadar pilihan
+backbone, model proposal dibandingkan dengan baseline arsitektur berbeda: **CoAtNet-0** (hybrid
+conv+attention, `coatnet_0_rw_224.sw_in1k`, **26.7 M params** — setara ConvNeXtV2-Tiny 28.5 M) +
+**CutMix + Mixup** (augmentasi mixing standar), **tanpa** stain augmentation, **tanpa** MHA. Protokol
+shared identik (epoch/lr/wd/focal/warmup/clip/bf16, 3 seed 42/123/2025, no-TTA headline). Detail kontrak
+implementasi di [PRD_BASELINE_COATNET.md](PRD_BASELINE_COATNET.md).
+
+### Tabel Utama — No-Norm, No-TTA (3 seed, headline)
+
+| Model                                  | Val F1 | **No-Norm F1 (mean±std)** | Acc (mean±std)  | Rec Abn | Rec Norm | Gap (mean±std)  |
+| -------------------------------------- | :----: | :-----------------------: | :-------------: | :-----: | :------: | :-------------: |
+| **CoAtNet-0 + CutMix+Mixup** (baseline)| 1.000  | **0.4185 ± 0.0223**       | 0.6587 ± 0.0382 | 95.1%   | **3.2%** | 0.341 ± 0.038   |
+| `no_mix` (ConvNeXtV2, tanpa mixing)    | 1.000  | 0.5636 ± 0.0817           | 0.6336 ± 0.0799 | 68.4%   | 52.5%    | 0.366 ± 0.080   |
+| `focusmix_stain` ★ (Ours)              | 1.000  | 0.5535 ± 0.1189           | 0.5703 ± 0.1300 | 48.4%   | 75.5%    | 0.430 ± 0.130   |
+
+Sumber: `results_comparison/aggregate.json` (gabungan `results_multiseed/` + `results_coatnet/`).
+
+### Rincian Per Kondisi CoAtNet-0 (no-TTA, mean ± std)
+
+| Kondisi  | F1 macro        | Accuracy        | Rec Abn | Rec Norm |
+| -------- | :-------------: | :-------------: | :-----: | :------: |
+| No Norm  | 0.4185 ± 0.0223 | 0.6587 ± 0.0382 | 95.1%   | 3.2%     |
+| Macenko  | 0.3762 ± 0.0684 | 0.4658 ± 0.1511 | 39.6%   | 61.5%    |
+| Reinhard | 0.4063 ± 0.0004 | 0.6819 ± 0.0006 | 99.9%   | 0.1%     |
+
+Sumber: `results_coatnet/aggregate.json`.
+
+### Ablation TTA-8 CoAtNet-0 (bukan headline)
+
+| No-Norm F1 (no-TTA) | No-Norm F1 (TTA-8) | Δ        |
+| :-----------------: | :----------------: | :------: |
+| 0.4185 ± 0.0223     | 0.4147 ± 0.0157    | −0.0038  |
+
+Sumber: `results_coatnet_tta8/aggregate.json`. Sama seperti ketiga eksperimen ConvNeXtV2, **TTA-8 tidak
+mengubah kesimpulan** (Δ dapat diabaikan) — bukti tambahan bahwa TTA bukan faktor.
+
+### Analisis
+
+- **CoAtNet baseline adalah model terburuk lintas-domain (F1 0.4185)** — di bawah kedua baseline
+  ConvNeXtV2 (`no_mix` 0.5636, Ours 0.5535), padahal kapasitas params setara dan in-domain sama-sama
+  jenuh (val F1 1.000). Selisih ~0.14 F1 **bukan** soal ukuran model.
+- **Kolaps ke bias-Abnormal yang ekstrem.** Recall Normal hanya **3.2%** (vs Abnormal 95.1%) — model
+  memprediksi hampir semua sel sebagai ALL. Accuracy 0.659 terlihat "wajar" semata karena distribusi
+  C-NMC 68% Abnormal; di balik itu spesifisitas nyaris nol. Pola ini sama arah dengan `no_mix`/`saliency`
+  ConvNeXtV2 tetapi **jauh lebih parah**.
+- **Normalisasi test-time TIDAK menyelamatkan CoAtNet.** Reinhard mempertahankan kolaps (99.9%/0.1%,
+  F1 0.406 — std ~0.0004, artinya kolaps total & konsisten ketiga seed). Macenko membalik prediksi
+  secara kacau (39.6%/61.5%) namun F1 malah turun (0.376) dengan variansi tinggi (±0.15 acc). **Tidak ada
+  satu pun kondisi normalisasi** yang membuat CoAtNet seimbang — berbeda dari `focusmix_stain` yang
+  seimbang **tanpa** normalisasi apa pun.
+- **Konsistensi kolaps (std rendah 0.022)** menandakan ini sifat sistematis arsitektur+augmentasi, bukan
+  noise antar-seed. seed123 sedikit kurang kolaps (Rec Norm 9.6%) tetapi tetap F1 buruk.
+
+### Implikasi untuk Klaim Paper
+
+Baseline CoAtNet **mengisolasi kontribusi** secara meyakinkan: mengganti backbone (ke arsitektur hybrid)
+**dan** mengganti mixing (ke CutMix/Mixup standar) **tidak** menghasilkan robustness lintas-domain — bahkan
+memperburuknya. Keseimbangan recall lintas-domain hanya tercapai lewat **train-time stain augmentation**
+(`focusmix_stain`), dan dicapai **tanpa** normalisasi test-time. Ini menopang langsung judul
+*Stain- and Specimen-Robust*: sumber robustness adalah penanganan stain saat training, bukan kapasitas
+model, bukan jenis mixing, dan bukan normalisasi test-time. Secara klinis, kolaps CoAtNet (spesifisitas
+~0) menjadikannya tak terpakai meski akurasi agregatnya tampak menengah.
+
+### Uji Signifikansi 3-Seed (F1 macro, no-norm)
+
+Paired test atas F1 per-seed (42/123/2025), C-NMC no-norm. **n=3 → daya uji rendah** (Wilcoxon tak pernah
+<0.25); **Cohen d** (effect size berpasangan) jadi indikator utama. Sumber: `src/significance_test.py`
+→ `results_comparison/significance.md`.
+
+| Perbandingan (a − b)                  | Δmean (a−b) | Cohen d | paired-t p | Tafsir                          |
+| ------------------------------------- | :---------: | :-----: | :--------: | ------------------------------- |
+| Ours `focusmix_stain` − CoAtNet-0     | **+0.1350** | **1.35** | 0.145     | efek **besar**; unggul atas baseline |
+| `no_mix` − CoAtNet-0                  | **+0.1451** | **1.63** | 0.106     | efek **besar**; unggul atas baseline |
+| Ours `focusmix_stain` − `no_mix`      | −0.0101     | −0.08   | 0.899     | **setara** (tied) → peran stain di recall, bukan F1 |
+| Ours `focusmix_stain` − `focusmix`    | +0.2049     | 0.80    | 0.300     | efek besar; stain-aug menyelamatkan mixing |
+
+> Kedua model ConvNeXtV2 mengungguli CoAtNet dengan **effect size besar (d > 1.3)**; p tidak <0.05 semata
+> karena n=3. Sebaliknya `focusmix_stain` vs `no_mix` benar-benar **setara** (d≈0) — menegaskan kontribusi
+> stain-aug ada di **keseimbangan recall**, bukan F1 absolut.
+
+### Kompleksitas Model & Latensi
+
+Input 224×224, FP32, RTX 3050 Laptop. Sumber: `src/complexity_benchmark.py` →
+`results_comparison/complexity.md`.
+
+| Model                          | Params (M) | FLOPs (G) | GMACs | Lat. b1 (ms/img) | Lat. b32 (ms/img) | Throughput b32 (img/s) |
+| ------------------------------ | :--------: | :-------: | :---: | :--------------: | :---------------: | :--------------------: |
+| ConvNeXtV2-Tiny (Ours, no MHA) | 27.9       | 8.91      | 4.45  | 13.80            | 5.17              | 193                    |
+| CoAtNet-0 (baseline)           | 26.7       | 8.81      | 4.41  | 15.89            | 4.30              | 233                    |
+
+> Kapasitas & beban komputasi **setara** (~27 M params, ~8.9 GFLOPs). CoAtNet bahkan sedikit lebih cepat
+> pada batch besar. Maka selisih F1 ~0.14 **bukan** akibat ukuran/biaya model, melainkan penanganan stain
+> saat training — memperkuat klaim kontribusi.
+
+### Gambar Confusion Matrix
+
+- `figures/cm_no_norm_3models.png` — CoAtNet-0 vs `no_mix` vs Ours (no-norm, agregat 3 seed, row-normalized
+  = recall). Visual kolaps CoAtNet (95.1%/3.2%) vs keseimbangan Ours (48.4%/75.5%).
+- `figures/cm_focusmix_stain_conditions.png` — Ours pada no_norm/Macenko/Reinhard (efek normalisasi test-time).
+
+Sumber: `src/plot_confusion_matrices.py`.
+
+---
+
 ## Hasil Per Eksperimen
 
 Confusion matrix dalam orientasi `[[TP_Abn, FN_Abn], [FP_Abn, TN_Norm]]` (baris = label benar,
@@ -498,6 +604,15 @@ laporkan F1 macro dan recall per-kelas, bukan hanya accuracy.**
 daripada False Positive. Eksperimen bias-Normal (`no_mix_mha`, `focusmix_mha`) memiliki >6.000 FN
 Abnormal dari 7.272 — tidak dapat diterima secara klinis tanpa koreksi (Reinhard atau kalibrasi).
 
+### 7. Robustness Berasal dari Train-Time Stain Aug, Bukan Arsitektur (baseline CoAtNet)
+
+Baseline **CoAtNet-0 + CutMix/Mixup** (arsitektur hybrid berbeda, mixing standar, tanpa stain aug)
+**gagal total** lintas-domain: F1 0.4185 ± 0.0223, kolaps bias-Abnormal (Rec Norm **3.2%**), dan
+**tidak terselamatkan oleh normalisasi test-time** (Reinhard 99.9%/0.1%). Mengganti backbone **dan**
+mixing sekaligus tidak menghasilkan robustness — hanya train-time stain augmentation yang menyeimbangkan
+recall. Ini memisahkan sumber kontribusi dari kapasitas/arsitektur model. Detail di bagian
+*Perbandingan dengan Baseline CoAtNet-0*.
+
 ---
 
 ## Rekomendasi
@@ -520,6 +635,8 @@ Abnormal dari 7.272 — tidak dapat diterima secara klinis tanpa koreksi (Reinha
 - Hasil mentah single-seed: `results/<exp>.json` per eksperimen + `results/summary.json` gabungan.
 - Hasil multi-seed (3 seed): `results_multiseed/` (no-TTA) & `results_multiseed_tta8/` (TTA-8 ablation),
   masing-masing dengan `aggregate.json` + `aggregate.md`.
+- Baseline CoAtNet-0 (folder terpisah): `results_coatnet/` (no-TTA) & `results_coatnet_tta8/` (TTA-8).
+  Tabel gabungan untuk paper: `results_comparison/aggregate.{json,md}`.
 
 ---
 

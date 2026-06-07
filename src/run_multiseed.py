@@ -14,6 +14,9 @@ Direktori output (relatif ke root proyek):
 Jalankan dari root proyek (skrip otomatis chdir ke root):
     python src/run_multiseed.py                              # 3 exp kunci x 3 seed
     python src/run_multiseed.py --exps focusmix_stain        # satu eksperimen
+    # HANYA baseline CoAtNet-0 x 3 seed, semua artefak di folder terpisah:
+    python src/run_multiseed.py --exps coatnet_0 \
+        --ckpt-root checkpoints_coatnet --log-root logs_coatnet --results-root results_coatnet
     python src/run_multiseed.py --seeds 42 123               # subset seed
     python src/run_multiseed.py --skip-existing              # lewati yang sudah jadi
     python src/run_multiseed.py --no-train                   # hanya evaluasi ckpt yang ada
@@ -57,16 +60,17 @@ def find_best_ckpt(ckpt_dir: Path):
     return max(cands, key=_val_f1)
 
 
-def train_one(exp: str, seed: int, data_dir: str, skip_existing: bool):
+def train_one(exp: str, seed: int, data_dir: str, skip_existing: bool,
+              ckpt_root: str = CKPT_ROOT, log_root: str = LOG_ROOT):
     run_name = f'{exp}_seed{seed}'
-    ckpt_dir = Path(CKPT_ROOT) / run_name
+    ckpt_dir = Path(ckpt_root) / run_name
     if skip_existing and find_best_ckpt(ckpt_dir) is not None:
         print(f'[skip-train] {run_name} (checkpoint sudah ada)')
         return find_best_ckpt(ckpt_dir)
 
     best = run_experiment(
         EXPERIMENTS[exp], data_dir=data_dir, seed=seed,
-        ckpt_root=CKPT_ROOT, log_root=LOG_ROOT, run_name=run_name,
+        ckpt_root=ckpt_root, log_root=log_root, run_name=run_name,
     )
     return Path(best) if best else find_best_ckpt(ckpt_dir)
 
@@ -114,7 +118,12 @@ def main():
                     help='1 = no-TTA (headline). Pakai 8 untuk ablation TTA.')
     ap.add_argument('--results-root', default=RESULTS_ROOT,
                     help='folder output JSON. Pakai folder lain (mis. '
-                         'results_multiseed_tta8) agar ablation TTA tidak menimpa no-TTA.')
+                         'results_multiseed_tta8 / results_coatnet) agar tidak menimpa run lain.')
+    ap.add_argument('--ckpt-root', default=CKPT_ROOT,
+                    help='folder checkpoint per-run. Pisahkan (mis. checkpoints_coatnet) '
+                         'agar artefak baseline tidak tercampur dengan ConvNeXtV2.')
+    ap.add_argument('--log-root', default=LOG_ROOT,
+                    help='folder CSV log per-run. Pisahkan (mis. logs_coatnet) bila perlu.')
     ap.add_argument('--no-train', action='store_true', help='lewati training')
     ap.add_argument('--no-eval', action='store_true', help='lewati evaluasi')
     ap.add_argument('--skip-existing', action='store_true',
@@ -136,9 +145,10 @@ def main():
 
             ckpt = None
             if not args.no_train:
-                ckpt = train_one(exp, seed, args.data_dir, args.skip_existing)
+                ckpt = train_one(exp, seed, args.data_dir, args.skip_existing,
+                                 ckpt_root=args.ckpt_root, log_root=args.log_root)
             if ckpt is None:
-                ckpt = find_best_ckpt(Path(CKPT_ROOT) / run_name)
+                ckpt = find_best_ckpt(Path(args.ckpt_root) / run_name)
             if ckpt is None:
                 print(f'[ERROR] tidak ada checkpoint untuk {run_name} — lewati evaluasi')
                 failures.append(run_name)

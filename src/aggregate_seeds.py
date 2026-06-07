@@ -15,6 +15,11 @@ file JSON per-seed-nya mengikuti skema yang sama dan ada di folder yang sama.
 Jalankan dari root proyek (otomatis chdir):
     python src/aggregate_seeds.py
     python src/aggregate_seeds.py --results-dir results_multiseed
+
+Bisa menggabungkan beberapa folder hasil dalam satu tabel (mis. ConvNeXtV2 + CoAtNet
+yang disimpan terpisah). Output ditulis ke --out-dir (default: folder pertama):
+    python src/aggregate_seeds.py --results-dir results_multiseed results_coatnet \
+        --out-dir results_comparison
 """
 import argparse
 import json
@@ -161,19 +166,28 @@ def to_markdown(agg):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--results-dir', default='results_multiseed')
+    ap.add_argument('--results-dir', nargs='+', default=['results_multiseed'],
+                    help='Satu atau beberapa folder hasil per-seed untuk diagregasi bersama.')
+    ap.add_argument('--out-dir', default=None,
+                    help='Folder output aggregate.{json,md} (default: folder --results-dir pertama).')
     args = ap.parse_args()
 
-    results_dir = Path(args.results_dir)
-    runs = collect(results_dir)
+    results_dirs = [Path(d) for d in args.results_dir]
+    runs = defaultdict(list)
+    for d in results_dirs:
+        for exp, entries in collect(d).items():
+            runs[exp].extend(entries)
     if not runs:
-        raise SystemExit(f'Tidak ada file *_seed*.json di {results_dir.resolve()}. '
+        searched = ', '.join(str(d.resolve()) for d in results_dirs)
+        raise SystemExit(f'Tidak ada file *_seed*.json di {searched}. '
                          f'Jalankan run_multiseed.py dulu.')
 
     agg = aggregate(runs)
 
-    out_json = results_dir / 'aggregate.json'
-    out_md = results_dir / 'aggregate.md'
+    out_dir = Path(args.out_dir) if args.out_dir else results_dirs[0]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_json = out_dir / 'aggregate.json'
+    out_md = out_dir / 'aggregate.md'
     with open(out_json, 'w') as f:
         json.dump(agg, f, indent=2)
     with open(out_md, 'w', encoding='utf-8') as f:

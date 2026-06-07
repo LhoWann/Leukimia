@@ -1,12 +1,17 @@
 __pycache__
 .venv
-checkpoints
-checkpoints_multiseed
+
+# Model weights & training logs (besar/regenerable) — semua varian
+checkpoints*
+logs*
+
+# Dataset mentah & turunannya (tidak di-commit)
 data
 dataset
-logs
-logs_multiseed
 PKG_C_NMC 2019
+
+# Hasil single-seed (regenerable); hasil multi-seed & perbandingan TETAP di-track
 result
 results
+
 STRATEGI_PENELITIAN.md

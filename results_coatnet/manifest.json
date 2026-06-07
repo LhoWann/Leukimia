@@ -1,0 +1,7 @@
+{
+  "coatnet_0": {
+    "42": "C:\\penelitian\\LEUKIMIA\\checkpoints_coatnet\\coatnet_0_seed42\\epoch=08-val_f1=1.0000.ckpt",
+    "123": "C:\\penelitian\\LEUKIMIA\\checkpoints_coatnet\\coatnet_0_seed123\\epoch=04-val_f1=1.0000.ckpt",
+    "2025": "C:\\penelitian\\LEUKIMIA\\checkpoints_coatnet\\coatnet_0_seed2025\\epoch=01-val_f1=1.0000.ckpt"
+  }
+}

@@ -2,6 +2,8 @@ import warnings
 warnings.filterwarnings("ignore", message="triton not found.*", module="torch.utils.flop_counter")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.functional")
 
+import math
+import random
 from typing import List, Optional
 
 import lightning as L
@@ -82,6 +84,80 @@ class ConvNeXtV2Classifier(nn.Module):
         feat = self.forward_features(x)
         pooled = self.pool(feat).flatten(1)
         return self.classifier(self.head_dropout(pooled))
+
+
+class CoAtNetClassifier(nn.Module):
+    """Baseline backbone: CoAtNet-0 (timm, pretrained ImageNet-1k).
+
+    Tanpa MHA injection — head sederhana (AdaptiveAvgPool sudah dilakukan timm
+    via global_pool='avg') + Dropout + Linear, menyamai head ConvNeXtV2Classifier
+    (head_dropout=0.3) agar perbandingan fair.
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        pretrained: bool = True,
+        model_name: str = 'coatnet_0_rw_224.sw_in1k',
+        head_dropout: float = 0.3,
+    ):
+        super().__init__()
+        self.backbone = timm.create_model(
+            model_name,
+            pretrained=pretrained,
+            num_classes=0,
+            global_pool='avg',
+        )
+        self.final_dim = self.backbone.num_features
+        self.head_dropout = nn.Dropout(head_dropout)
+        self.classifier = nn.Linear(self.final_dim, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.backbone(x)                       # (B, num_features) pooled
+        return self.classifier(self.head_dropout(feat))
+
+
+def _rand_bbox(height: int, width: int, lam: float):
+    cut_rat = math.sqrt(max(0.0, 1.0 - lam))
+    cut_h, cut_w = int(height * cut_rat), int(width * cut_rat)
+    cy, cx = np.random.randint(height), np.random.randint(width)
+    y1 = max(cy - cut_h // 2, 0); y2 = min(cy + cut_h // 2, height)
+    x1 = max(cx - cut_w // 2, 0); x2 = min(cx + cut_w // 2, width)
+    return x1, y1, x2, y2
+
+
+def cutmix_mixup_batch(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    cutmix_alpha: float = 1.0,
+    mixup_alpha: float = 0.2,
+    mix_prob: float = 0.5,
+):
+    """Batch-level CutMix atau Mixup (pilih acak per batch).
+
+    Mengembalikan (images, labels_a, labels_b, lam) yang kompatibel dengan
+    training_step (lam·loss_a + (1−lam)·loss_b). Dengan probabilitas (1−mix_prob)
+    batch dibiarkan apa adanya (lam=1, labels_b=labels_a).
+    """
+    if np.random.rand() >= mix_prob:
+        return images, labels, labels, 1.0
+
+    perm = torch.randperm(images.size(0), device=images.device)
+    labels_a, labels_b = labels, labels[perm]
+
+    if np.random.rand() < 0.5:  # CutMix
+        lam = float(np.random.beta(cutmix_alpha, cutmix_alpha))
+        h, w = images.shape[2], images.shape[3]
+        x1, y1, x2, y2 = _rand_bbox(h, w, lam)
+        images = images.clone()
+        patch = images[perm, :, y1:y2, x1:x2].clone()
+        images[:, :, y1:y2, x1:x2] = patch
+        lam = 1.0 - ((x2 - x1) * (y2 - y1) / (h * w))
+    else:                        # Mixup
+        lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+        images = lam * images + (1.0 - lam) * images[perm]
+
+    return images, labels_a, labels_b, lam
 
 
 class GradCAMExtractor:
@@ -178,17 +254,30 @@ class LeukemiaLightningModel(L.LightningModule):
         class_weights: Optional[List[float]] = None,
         use_focal_loss: bool = True,
         focal_gamma: float = 2.0,
+        backbone: str = 'convnextv2',
+        coatnet_model_name: str = 'coatnet_0_rw_224.sw_in1k',
+        mixing: str = 'none',
+        cutmix_alpha: float = 1.0,
+        mixup_alpha: float = 0.2,
+        mix_prob: float = 0.5,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        self.model = ConvNeXtV2Classifier(
-            num_classes=num_classes,
-            pretrained=pretrained,
-            use_mha=use_mha,
-            mha_stage=mha_stage,
-            num_heads=num_heads,
-        )
+        if backbone == 'coatnet':
+            self.model = CoAtNetClassifier(
+                num_classes=num_classes,
+                pretrained=pretrained,
+                model_name=coatnet_model_name,
+            )
+        else:
+            self.model = ConvNeXtV2Classifier(
+                num_classes=num_classes,
+                pretrained=pretrained,
+                use_mha=use_mha,
+                mha_stage=mha_stage,
+                num_heads=num_heads,
+            )
 
         self.label_smoothing = label_smoothing
         self.register_buffer(
@@ -211,6 +300,15 @@ class LeukemiaLightningModel(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, targets_a, targets_b, lam = batch
+        if self.hparams.mixing == 'cutmix_mixup':
+            # Batch-level CutMix/Mixup. Dengan aug_mode='none' di datamodule,
+            # targets_a == targets_b == label asli, jadi aman dipakai sebagai sumber.
+            images, targets_a, targets_b, lam = cutmix_mixup_batch(
+                images, targets_a,
+                cutmix_alpha=self.hparams.cutmix_alpha,
+                mixup_alpha=self.hparams.mixup_alpha,
+                mix_prob=self.hparams.mix_prob,
+            )
         logits = self(images)
 
         ce_a = F.cross_entropy(logits, targets_a, weight=self.class_weight_tensor,
@@ -254,10 +352,19 @@ class LeukemiaLightningModel(L.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        param_groups = build_param_groups(
-            self.model, self.hparams.lr, self.hparams.weight_decay, self.hparams.llrd
-        )
-        optimizer = optim.AdamW(param_groups)
+        if self.hparams.backbone == 'coatnet':
+            # Baseline: uniform LR fine-tuning (LLRD adalah detail spesifik
+            # ConvNeXtV2, tidak termasuk protokol shared di PERBANDINGAN_BASELINE.md).
+            optimizer = optim.AdamW(
+                self.model.parameters(),
+                lr=self.hparams.lr,
+                weight_decay=self.hparams.weight_decay,
+            )
+        else:
+            param_groups = build_param_groups(
+                self.model, self.hparams.lr, self.hparams.weight_decay, self.hparams.llrd
+            )
+            optimizer = optim.AdamW(param_groups)
 
         warmup_steps = self.hparams.warmup_epochs
         total_steps = self.hparams.max_epochs

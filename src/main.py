@@ -72,6 +72,13 @@ class ExperimentConfig:
     stain_aug_prob: float = 0.5
     use_focal_loss: bool = True
     focal_gamma: float = 2.0
+    # Pemilihan backbone & augmentasi mixing (baseline CoAtNet-0).
+    backbone: str = 'convnextv2'
+    coatnet_model_name: str = 'coatnet_0_rw_224.sw_in1k'
+    mixing: str = 'none'          # 'none' | 'cutmix_mixup'
+    cutmix_alpha: float = 1.0
+    mixup_alpha: float = 0.2
+    mix_prob: float = 0.5
 
 
 EXPERIMENTS = {
@@ -163,6 +170,23 @@ EXPERIMENTS = {
         stain_sigma_mean=0.35,
         stain_sigma_std=0.20,
         stain_aug_prob=0.8,
+    ),
+
+    # Baseline pembanding (lihat PRD_BASELINE_COATNET.md / PERBANDINGAN_BASELINE.md).
+    # CoAtNet-0 + CutMix/Mixup, tanpa stain-aug, tanpa MHA. Protokol shared identik
+    # dengan eksperimen ConvNeXtV2 (epoch/lr/wd/focal/warmup/clip/bf16 dari default).
+    'coatnet_0': ExperimentConfig(
+        name='coatnet_0',
+        aug_mode='none',          # augmentasi dasar saja; mixing di level batch
+        use_mha=False,
+        use_robust_aug=False,     # tanpa ReinhardJitter (baseline)
+        backbone='coatnet',
+        coatnet_model_name='coatnet_0_rw_224.sw_in1k',
+        mixing='cutmix_mixup',
+        cutmix_alpha=1.0,
+        mixup_alpha=0.2,
+        mix_prob=0.5,
+        warmup_epochs=3,
     ),
 }
 
@@ -257,6 +281,12 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
         class_weights=class_weights,
         use_focal_loss=cfg.use_focal_loss,
         focal_gamma=cfg.focal_gamma,
+        backbone=cfg.backbone,
+        coatnet_model_name=cfg.coatnet_model_name,
+        mixing=cfg.mixing,
+        cutmix_alpha=cfg.cutmix_alpha,
+        mixup_alpha=cfg.mixup_alpha,
+        mix_prob=cfg.mix_prob,
     )
 
     ckpt_dir = Path(ckpt_root) / run_name
