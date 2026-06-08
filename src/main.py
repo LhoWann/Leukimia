@@ -72,10 +72,9 @@ class ExperimentConfig:
     stain_aug_prob: float = 0.5
     use_focal_loss: bool = True
     focal_gamma: float = 2.0
-    # Pemilihan backbone & augmentasi mixing (baseline CoAtNet-0).
     backbone: str = 'convnextv2'
     coatnet_model_name: str = 'coatnet_0_rw_224.sw_in1k'
-    mixing: str = 'none'          # 'none' | 'cutmix_mixup'
+    mixing: str = 'none'
     cutmix_alpha: float = 1.0
     mixup_alpha: float = 0.2
     mix_prob: float = 0.5
@@ -172,14 +171,11 @@ EXPERIMENTS = {
         stain_aug_prob=0.8,
     ),
 
-    # Baseline pembanding (lihat PRD_BASELINE_COATNET.md / PERBANDINGAN_BASELINE.md).
-    # CoAtNet-0 + CutMix/Mixup, tanpa stain-aug, tanpa MHA. Protokol shared identik
-    # dengan eksperimen ConvNeXtV2 (epoch/lr/wd/focal/warmup/clip/bf16 dari default).
     'coatnet_0': ExperimentConfig(
         name='coatnet_0',
-        aug_mode='none',          # augmentasi dasar saja; mixing di level batch
+        aug_mode='none',
         use_mha=False,
-        use_robust_aug=False,     # tanpa ReinhardJitter (baseline)
+        use_robust_aug=False,
         backbone='coatnet',
         coatnet_model_name='coatnet_0_rw_224.sw_in1k',
         mixing='cutmix_mixup',

@@ -1,7 +1,9 @@
-# Hasil & Analisis Eksperimen
+# Hasil, Analisis & Protokol Eksperimen
 
-Model dilatih pada **ALL-IDB** (Giemsa stain, Italia) dan dievaluasi secara eksternal pada
-**C-NMC 2019 train-merged** (Wright-Giemsa, India) — 10.661 sel berlabel (7.272 ALL + 3.389 HEM) —
+Dokumen tunggal yang mencakup **seluruh** hasil eksperimen, analisis lintas-domain, protokol
+perbandingan *fair* dengan baseline CoAtNet-0, uji signifikansi, benchmark kompleksitas, dan temuan
+kunci untuk paper. Model dilatih pada **ALL-IDB** (Giemsa stain, Italia) dan dievaluasi secara eksternal
+pada **C-NMC 2019 train-merged** (Wright-Giemsa, India) — 10.661 sel berlabel (7.272 ALL + 3.389 HEM) —
 untuk mengukur generalisasi lintas-domain.
 
 > **Catatan reproducibility.** Angka ablation 10-eksperimen di dokumen ini diambil langsung dari
@@ -14,10 +16,26 @@ untuk mengukur generalisasi lintas-domain.
 > (γ=2.0) dengan inverse-frequency class weights, checkpoint terbaik dipilih berdasarkan **`val_f1`**
 > (bukan `val_acc`).
 
-> **Status kelengkapan eksperimen ConvNeXtV2 (per 2026-06-07).** ✅ 10 eksperimen ablation single-seed
-> (no-TTA) — selesai. ✅ 3 eksperimen kunci × 3 seed (no-TTA, headline) — selesai. ✅ 3 eksperimen
-> kunci × 3 seed (TTA-8, ablation) — selesai. Sesuai protokol di `PERBANDINGAN_BASELINE.md`, eksperimen
+> **Status kelengkapan (per 2026-06-08).** ✅ 10 eksperimen ablation ConvNeXtV2 single-seed (no-TTA). ✅ 3
+> eksperimen kunci × 3 seed (no-TTA, headline) + TTA-8 ablation. ✅ Baseline **CoAtNet-0 × 3 seed**
+> (no-TTA + TTA-8). ✅ Uji signifikansi, benchmark kompleksitas, figur confusion matrix. Eksperimen
 > ablation di luar tiga kunci cukup single-seed.
+
+---
+
+## Daftar Isi
+
+- [Setup Eksperimen](#setup-eksperimen)
+- [Protokol Perbandingan Fair (CoAtNet-0)](#protokol-perbandingan-fair-coatnet-0)
+- [Analisis: Val Accuracy ~100%](#analisis-val-accuracy-100-di-semua-eksperimen)
+- [Ringkasan Lintas-Domain — Ablation Single-Seed](#ringkasan-lintas-domain--ablation-single-seed-semua-eksperimen)
+- [Validasi Multi-Seed (3 Seed) — Angka Headline](#validasi-multi-seed-3-seed--angka-headline)
+- [Perbandingan dengan Baseline CoAtNet-0](#perbandingan-dengan-baseline-coatnet-0-cross-architecture)
+- [Hasil Per Eksperimen](#hasil-per-eksperimen)
+- [Kalibrasi Threshold (Diagnostik)](#kalibrasi-threshold-diagnostik)
+- [Temuan Kunci](#temuan-kunci)
+- [Rekomendasi](#rekomendasi)
+- [Catatan Dataset & Artefak](#catatan-dataset--artefak)
 
 ---
 
@@ -25,7 +43,7 @@ untuk mengukur generalisasi lintas-domain.
 
 ### Faktor yang Diuji
 
-Sepuluh eksperimen membentuk ablation atas tiga sumbu desain:
+Sepuluh eksperimen ConvNeXtV2 membentuk ablation atas tiga sumbu desain:
 
 | Sumbu                       | Varian yang diuji                                                        |
 | --------------------------- | ------------------------------------------------------------------------ |
@@ -47,6 +65,75 @@ Sepuluh eksperimen membentuk ablation atas tiga sumbu desain:
 | **`focusmix_stain`**    | focusmix       |  –  | 0.15 / 0.5                | **FocusAugMix + stain aug moderat**      |
 | `focusmix_stain_strong` | focusmix       |  –  | 0.25 / 0.7                | Stain aug kuat                           |
 | `focusmix_stain_max`    | focusmix       |  –  | 0.35 / 0.8                | Stain aug maksimal                       |
+
+Plus **baseline lintas-arsitektur** `coatnet_0` (CoAtNet-0 + CutMix/Mixup), lihat protokol di bawah.
+
+---
+
+## Protokol Perbandingan Fair (CoAtNet-0)
+
+Untuk membuktikan kontribusi berasal dari **train-time stain handling** dan bukan sekadar pilihan
+backbone, model proposal dibandingkan dengan baseline arsitektur berbeda: **CoAtNet-0** (hybrid
+conv+attention, `coatnet_0_rw_224.sw_in1k`, ~26.7 M params — setara ConvNeXtV2-Tiny ~28.5 M) + **CutMix +
+Mixup** (mixing standar), **tanpa** stain augmentation, **tanpa** MHA. CoAtNet-0 dipilih karena kapasitas
+params setara, paradigma arsitektur berbeda (hybrid vs murni-conv), dan tersedia pretrained ImageNet di
+`timm`.
+
+Agar perbandingan *fair*, sejumlah komponen **harus identik** di kedua model; hanya komponen kontribusi
+yang boleh berbeda.
+
+### Komponen Terkunci (Harus Identik di Kedua Model)
+
+| Komponen                 | Nilai terkunci                                                                 | Sumber-of-truth                                |
+| ------------------------ | ------------------------------------------------------------------------------ | ---------------------------------------------- |
+| Dataset train            | ALL-IDB1+IDB2, split image-level 80/20 (~556 train / 204 val)                  | `src/segment_dataset.py`, `dataset/`           |
+| Dataset eval eksternal   | C-NMC 2019 `C-NMC_train_merged` (10.661 sel)                                   | `PKG_C_NMC 2019/`                              |
+| Image size               | 224 × 224                                                                      | `ExperimentConfig`                             |
+| Augmentasi dasar         | Resize → HFlip → VFlip → Rotation(20°) → ColorJitter(0.25/0.25/0.25/0.08) → ToTensor → Normalize(ImageNet) | `src/data_module.py` |
+| Loss                     | Weighted Focal Loss, γ=2.0, class_weights = inverse-freq dari train            | `src/lightning_model.py`, `get_class_weights()`|
+| Optimizer                | AdamW                                                                          | `ExperimentConfig`                             |
+| LR / weight decay        | 1e-4 / 0.05                                                                     | `ExperimentConfig`                             |
+| Scheduler                | Cosine Annealing + linear warmup 3 epoch                                        | `src/lightning_model.py`                       |
+| Max epochs / early stop  | 30 epoch, EarlyStopping(`val_loss`, patience=10)                               | `src/main.py`                                  |
+| Gradient clip            | 1.0                                                                            | `src/main.py` Trainer                          |
+| Precision                | `bf16-mixed` (fallback fp32)                                                    | `src/main.py` Trainer                          |
+| Checkpoint monitor       | `val_f1` (max), save_top_k=1                                                    | `src/main.py`                                  |
+| Normalisasi test         | Lapor **no_norm**, **macenko**, **reinhard** (ref fit dari ALL-IDB train)      | `src/evaluate_external.py`                     |
+| TTA                      | Headline **n_tta=1 (no-TTA)**; TTA-8 hanya ablation                            | `evaluate_external.py --tta-n`                 |
+| Multi-seed               | **42 / 123 / 2025**, lapor `mean ± std`                                        | `src/run_multiseed.py` (`SEEDS`)               |
+| Class index mapping      | 0=Abnormal, 1=Normal (urutan alfabet ImageFolder)                              | `src/data_module.py`                           |
+
+### Komponen Pembeda (Kontribusi Masing-Masing)
+
+| Komponen             | CoAtNet-0 (baseline)                           | ConvNeXtV2-Tiny (Ours)                |
+| -------------------- | ---------------------------------------------- | ------------------------------------- |
+| Backbone             | **CoAtNet-0** (`timm`, pretrained IN1k, ~26.7M)| ConvNeXtV2-Tiny (~28.5M)              |
+| Augmentasi mixing    | **CutMix + Mixup** (per-batch, p=0.5)          | FocusAugMix (SLIC+saliency+Grad-CAM) |
+| Stain aug train-time | **Tidak ada**                                  | ReinhardJitter σ_mean=0.15, p=0.5    |
+| MHA                  | Tidak ada                                       | Tidak ada (di `focusmix_stain`)      |
+| LLRD                 | Tidak ada (uniform-LR AdamW)                    | 0.75 per stage                       |
+
+### Status & Cara Menjalankan
+
+Diimplementasi via **`LeukemiaLightningModel` yang backbone-switchable** (`backbone='convnextv2'|'coatnet'`),
+sehingga `evaluate_external.py` & `run_multiseed.py` tidak perlu diubah dan tetap me-load CoAtNet via
+`load_from_checkpoint` (hyperparameter `backbone` tersimpan otomatis). Komponen kunci di
+`src/lightning_model.py`: kelas `CoAtNetClassifier` (head Dropout(0.3)+Linear), fungsi `cutmix_mixup_batch()`
+(CutMix/Mixup level-batch), cabang backbone + optimizer uniform-LR untuk CoAtNet. Entri
+`EXPERIMENTS['coatnet_0']` di `src/main.py` (`aug_mode='none'`, `mixing='cutmix_mixup'`, tanpa stain-aug/MHA).
+
+```bash
+# Baseline CoAtNet-0 × 3 seed (artefak DIPISAH dari ConvNeXtV2)
+python src/run_multiseed.py --exps coatnet_0 \
+    --ckpt-root checkpoints_coatnet --log-root logs_coatnet --results-root results_coatnet
+
+# Gabungkan ke tabel perbandingan
+python src/aggregate_seeds.py --results-dir results_multiseed results_coatnet --out-dir results_comparison
+
+# (Opsional) ablation TTA-8 tanpa latih ulang
+python src/run_multiseed.py --exps coatnet_0 --no-train --tta-n 8 \
+    --ckpt-root checkpoints_coatnet --results-root results_coatnet_tta8
+```
 
 ---
 
@@ -196,12 +283,9 @@ Sumber: `results_multiseed_tta8/aggregate.json`.
 
 ## Perbandingan dengan Baseline CoAtNet-0 (Cross-Architecture)
 
-Untuk membuktikan kontribusi berasal dari **train-time stain handling** dan bukan sekadar pilihan
-backbone, model proposal dibandingkan dengan baseline arsitektur berbeda: **CoAtNet-0** (hybrid
-conv+attention, `coatnet_0_rw_224.sw_in1k`, **26.7 M params** — setara ConvNeXtV2-Tiny 28.5 M) +
-**CutMix + Mixup** (augmentasi mixing standar), **tanpa** stain augmentation, **tanpa** MHA. Protokol
-shared identik (epoch/lr/wd/focal/warmup/clip/bf16, 3 seed 42/123/2025, no-TTA headline). Detail kontrak
-implementasi di [PRD_BASELINE_COATNET.md](PRD_BASELINE_COATNET.md).
+Protokol shared identik (lihat [Protokol Perbandingan Fair](#protokol-perbandingan-fair-coatnet-0)):
+epoch/lr/wd/focal/warmup/clip/bf16, 3 seed 42/123/2025, no-TTA headline. Pembeda hanya backbone (CoAtNet-0
+vs ConvNeXtV2) + mixing (CutMix/Mixup vs FocusAugMix) + ada/tidaknya stain-aug.
 
 ### Tabel Utama — No-Norm, No-TTA (3 seed, headline)
 
@@ -292,9 +376,9 @@ Input 224×224, FP32, RTX 3050 Laptop. Sumber: `src/complexity_benchmark.py` →
 
 ### Gambar Confusion Matrix
 
-- `figures/cm_no_norm_3models.png` — CoAtNet-0 vs `no_mix` vs Ours (no-norm, agregat 3 seed, row-normalized
-  = recall). Visual kolaps CoAtNet (95.1%/3.2%) vs keseimbangan Ours (48.4%/75.5%).
-- `figures/cm_focusmix_stain_conditions.png` — Ours pada no_norm/Macenko/Reinhard (efek normalisasi test-time).
+- `figures/cm_no_norm_3models.{pdf,png}` — CoAtNet-0 vs `no_mix` vs Ours (no-norm, agregat 3 seed,
+  row-normalized = recall). Visual kolaps CoAtNet (95.1%/3.2%) vs keseimbangan Ours (48.4%/75.5%).
+- `figures/cm_focusmix_stain_conditions.{pdf,png}` — Ours pada no_norm/Macenko/Reinhard (efek normalisasi test-time).
 
 Sumber: `src/plot_confusion_matrices.py`.
 
@@ -596,7 +680,7 @@ laporkan F1 macro dan recall per-kelas, bukan hanya accuracy.**
 
 | Arah bias        | Eksperimen                                            | Mekanisme                                                       |
 | ---------------- | ----------------------------------------------------- | -------------------------------------------------------------- |
-| → Abnormal       | `no_mix`, `saliency`                                  | Imbalance training (2:1) + ciri blast persisten lintas domain  |
+| → Abnormal       | `no_mix`, `saliency`, **CoAtNet-0**                   | Imbalance training (2:1) + ciri blast persisten lintas domain  |
 | → Normal         | `no_mix_mha`, `focusmix*`, `focusmix_mha*`            | Mixing/MHA mengacaukan representasi Abnormal; sel blast C-NMC yang bersih salah dibaca Normal |
 | Seimbang         | **`focusmix_stain`**                                  | Stain aug moderat → invariansi warna tanpa merusak morfologi   |
 
@@ -610,8 +694,8 @@ Baseline **CoAtNet-0 + CutMix/Mixup** (arsitektur hybrid berbeda, mixing standar
 **gagal total** lintas-domain: F1 0.4185 ± 0.0223, kolaps bias-Abnormal (Rec Norm **3.2%**), dan
 **tidak terselamatkan oleh normalisasi test-time** (Reinhard 99.9%/0.1%). Mengganti backbone **dan**
 mixing sekaligus tidak menghasilkan robustness — hanya train-time stain augmentation yang menyeimbangkan
-recall. Ini memisahkan sumber kontribusi dari kapasitas/arsitektur model. Detail di bagian
-*Perbandingan dengan Baseline CoAtNet-0*.
+recall. Ini memisahkan sumber kontribusi dari kapasitas/arsitektur model. Detail di
+[Perbandingan dengan Baseline CoAtNet-0](#perbandingan-dengan-baseline-coatnet-0-cross-architecture).
 
 ---
 
@@ -627,17 +711,27 @@ recall. Ini memisahkan sumber kontribusi dari kapasitas/arsitektur model. Detail
 
 ---
 
-## Catatan Dataset
+## Catatan Dataset & Artefak
 
 - **Training/val:** ALL-IDB1 + ALL-IDB2 (Giemsa, Italia) — ~556 train / 204 val (image-level split).
 - **External test:** `C-NMC_train_merged` (Wright-Giemsa, India) — **10.661 sel** (7.272 ALL + 3.389 HEM).
   Ini satu-satunya split C-NMC berlabel publik; split test (prelim & final) flat tanpa label.
-- Hasil mentah single-seed: `results/<exp>.json` per eksperimen + `results/summary.json` gabungan.
-- Hasil multi-seed (3 seed): `results_multiseed/` (no-TTA) & `results_multiseed_tta8/` (TTA-8 ablation),
-  masing-masing dengan `aggregate.json` + `aggregate.md`.
-- Baseline CoAtNet-0 (folder terpisah): `results_coatnet/` (no-TTA) & `results_coatnet_tta8/` (TTA-8).
-  Tabel gabungan untuk paper: `results_comparison/aggregate.{json,md}`.
+
+| Artefak                                   | Isi                                                          |
+| ----------------------------------------- | ----------------------------------------------------------- |
+| `results/<exp>.json` + `summary.json`     | Hasil mentah single-seed (ablation 10 eksperimen)           |
+| `results_multiseed/aggregate.{json,md}`   | ConvNeXtV2 3 seed, no-TTA (headline)                        |
+| `results_multiseed_tta8/aggregate.{json,md}` | ConvNeXtV2 3 seed, TTA-8 (ablation)                      |
+| `results_coatnet/aggregate.{json,md}`     | Baseline CoAtNet-0 3 seed, no-TTA                          |
+| `results_coatnet_tta8/aggregate.{json,md}`| Baseline CoAtNet-0 3 seed, TTA-8 (ablation)               |
+| `results_comparison/aggregate.{json,md}`  | Tabel gabungan ConvNeXtV2 + CoAtNet untuk paper            |
+| `results_comparison/significance.md`      | Uji signifikansi 3-seed (paired t-test + Wilcoxon + Cohen d)|
+| `results_comparison/complexity.md`        | Benchmark params/FLOPs/latensi                              |
+| `figures/cm_*.{pdf,png}`                  | Figur confusion matrix kualitas-paper                       |
+
+Pipeline lengkap untuk mereproduksi semua artefak di atas: lihat bagian **Reproduksi Lengkap (TL;DR)**
+di [README.md](README.md).
 
 ---
 
-Last updated: 2026-06-07
+Last updated: 2026-06-08

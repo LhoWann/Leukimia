@@ -1,27 +1,3 @@
-"""
-Multi-seed training + evaluasi eksternal untuk eksperimen kunci.
-
-Melatih tiap (eksperimen, seed) ke direktori terpisah lalu menjalankan evaluasi
-C-NMC (default no-TTA), dan menyimpan SATU JSON per (eksperimen, seed) dengan
-field `seed`/`exp` yang siap diagregasi oleh aggregate_seeds.py.
-
-Direktori output (relatif ke root proyek):
-    checkpoints_multiseed/<exp>_seed<seed>/   <- bobot terbaik per run
-    logs_multiseed/<exp>_seed<seed>/          <- CSV metrics
-    results_multiseed/<exp>_seed<seed>.json   <- hasil evaluasi C-NMC
-    results_multiseed/manifest.json           <- peta exp -> seed -> ckpt
-
-Jalankan dari root proyek (skrip otomatis chdir ke root):
-    python src/run_multiseed.py                              # 3 exp kunci x 3 seed
-    python src/run_multiseed.py --exps focusmix_stain        # satu eksperimen
-    # HANYA baseline CoAtNet-0 x 3 seed, semua artefak di folder terpisah:
-    python src/run_multiseed.py --exps coatnet_0 \
-        --ckpt-root checkpoints_coatnet --log-root logs_coatnet --results-root results_coatnet
-    python src/run_multiseed.py --seeds 42 123               # subset seed
-    python src/run_multiseed.py --skip-existing              # lewati yang sudah jadi
-    python src/run_multiseed.py --no-train                   # hanya evaluasi ckpt yang ada
-    python src/run_multiseed.py --tta-n 8 --no-train         # ablation TTA-8 di ckpt yang ada
-"""
 import argparse
 import json
 import os
@@ -38,7 +14,6 @@ if str(SRC) not in sys.path:
 
 from main import EXPERIMENTS, run_experiment
 
-# Eksperimen yang masuk klaim utama paper (lihat PERBANDINGAN_BASELINE.md).
 KEY_EXPERIMENTS = ['focusmix_stain', 'no_mix', 'focusmix']
 SEEDS = [42, 123, 2025]
 
@@ -96,7 +71,6 @@ def eval_one(exp: str, seed: int, ckpt_path: Path, cnmc_dir: str,
         print('  $', ' '.join(cmd))
         subprocess.run(cmd, check=True)
 
-    # Sisipkan metadata seed/exp agar aggregate_seeds.py tidak perlu menebak dari nama file.
     with open(out_json) as f:
         data = json.load(f)
     data['seed'] = seed

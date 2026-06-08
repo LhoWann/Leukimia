@@ -16,17 +16,14 @@ SEED = 42
 CLASS_MAP = {"0": "Normal", "1": "Abnormal"}
 VALID_IMG_EXT = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
 
-# WBC detection parameters for Normal IDB1 images
 WBC_HSV_LOWER = np.array([110, 30, 20])
 WBC_HSV_UPPER = np.array([175, 255, 160])
 WBC_AREA_MIN = 1000
 WBC_AREA_MAX = 35000
 WBC_CIRCULARITY_MIN = 0.35
-WBC_MIN_CELL_DIST = 200     # min pixel distance between two cell centroids
-WBC_MAX_CELLS_PER_IMG = 20  # cap to avoid one image dominating the class
+WBC_MIN_CELL_DIST = 200
+WBC_MAX_CELLS_PER_IMG = 20
 
-
-# .xyc parsing
 
 def parse_xyc(xyc_path):
     centroids = []
@@ -46,16 +43,6 @@ def parse_xyc(xyc_path):
     return centroids
 
 
-# ---------------------------------------------------------------------------
-# WBC detection (for Normal IDB1 images that have no .xyc annotations)
-# Strategy: Giemsa-stained WBC nuclei appear dark purple/violet.
-#   1. HSV threshold isolates nuclei.
-#   2. Morphological close+open removes noise.
-#   3. Contour circularity filter removes non-cell blobs (RBC aggregates, etc.)
-#   4. Non-maximum suppression by distance removes overlapping centroids.
-#   5. Hard cap prevents one image from dominating the Normal class.
-# ---------------------------------------------------------------------------
-
 def _circularity(contour):
     area = cv2.contourArea(contour)
     perimeter = cv2.arcLength(contour, closed=True)
@@ -65,7 +52,6 @@ def _circularity(contour):
 
 
 def _nms_centroids(centroids, min_dist):
-    """Remove centroids that are closer than min_dist to a higher-area centroid."""
     centroids = sorted(centroids, key=lambda c: c[2], reverse=True)
     kept = []
     for cx, cy, area in centroids:
@@ -79,7 +65,6 @@ def _nms_centroids(centroids, min_dist):
 
 
 def detect_wbc_centroids(img_rgb):
-    """Return list of (cx, cy) for WBCs detected in a Normal blood smear."""
     hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
     mask = cv2.inRange(hsv, WBC_HSV_LOWER, WBC_HSV_UPPER)
 
@@ -109,8 +94,6 @@ def detect_wbc_centroids(img_rgb):
     return [(cx, cy) for cx, cy, _ in candidates]
 
 
-# Cropping
-
 def crop_around_centroid(img_np, cx, cy, size=CROP_SIZE):
     h, w = img_np.shape[:2]
     half = size // 2
@@ -130,8 +113,6 @@ def crop_around_centroid(img_np, cx, cy, size=CROP_SIZE):
     return crop
 
 
-# Helpers
-
 def get_class_label(stem):
     parts = stem.rsplit('_', 1)
     if len(parts) == 2 and parts[1] in CLASS_MAP:
@@ -142,13 +123,8 @@ def get_class_label(stem):
 def save_jpg(img_np, out_path):
     Image.fromarray(img_np).save(out_path, 'JPEG', quality=95)
 
-# Per-dataset processors
 
 def process_idb1(output_splits):
-    """
-    Abnormal (_1): crop from .xyc ground-truth centroids.
-    Normal   (_0): detect WBC via HSV since .xyc files are empty for healthy donors.
-    """
     img_dir = os.path.join(IDB1_DIR, 'im')
     xyc_dir = os.path.join(IDB1_DIR, 'xyc')
 
@@ -179,7 +155,6 @@ def process_idb1(output_splits):
                     skipped += 1
                     continue
             else:
-                # Normal: .xyc is always empty — detect WBC automatically
                 centroids = detect_wbc_centroids(img_np)
                 if not centroids:
                     skipped += 1
@@ -198,7 +173,6 @@ def process_idb1(output_splits):
 
 
 def process_idb2(output_splits):
-    """ALL-IDB2: already single cells — copy and resize uniformly."""
     img_dir = os.path.join(IDB2_DIR, 'img')
 
     img_files = sorted(
@@ -226,7 +200,6 @@ def process_idb2(output_splits):
 
     return counts
 
-# Summary
 
 def print_summary(output_splits):
     for split in ('train', 'val'):

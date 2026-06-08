@@ -4,7 +4,9 @@ Deteksi Otomatis Acute Lymphoblastic Leukemia (ALL) dari Citra Apusan Darah Tepi
 
 Model dilatih pada **ALL-IDB** (Giemsa stain, Italia) dan dievaluasi secara eksternal pada
 **C-NMC 2019** (Wright-Giemsa, India) dengan stain normalization untuk mengukur generalisasi
-lintas-domain.
+lintas-domain. Repositori ini menyediakan pipeline **end-to-end yang dapat direproduksi**: dari
+preprocessing dataset mentah, training multi-seed, baseline pembanding (CoAtNet-0), evaluasi
+lintas-domain, uji signifikansi statistik, benchmark kompleksitas, sampai pembuatan figur paper.
 
 ---
 
@@ -15,15 +17,23 @@ lintas-domain.
 - [Arsitektur &amp; Metodologi](#arsitektur--metodologi)
 - [Struktur Proyek](#struktur-proyek)
 - [Instalasi](#instalasi)
-- [Alur Kerja Lengkap](#alur-kerja-lengkap)
+- [Reproduksi Lengkap (TL;DR)](#reproduksi-lengkap-tldr)
+- [Alur Kerja Detail](#alur-kerja-detail)
   - [1. Persiapan Data](#1-persiapan-data)
-  - [2. Training](#2-training)
-  - [3. Monitoring](#3-monitoring)
-  - [4. Evaluasi In-Domain](#4-evaluasi-in-domain)
-  - [5. Evaluasi Eksternal C-NMC 2019](#5-evaluasi-eksternal-c-nmc-2019)
+  - [2. Training Satu Eksperimen](#2-training-satu-eksperimen)
+  - [3. Daftar Eksperimen](#3-daftar-eksperimen)
+  - [4. Validasi Multi-Seed](#4-validasi-multi-seed-run_multiseedpy)
+  - [5. Baseline CoAtNet-0](#5-baseline-coatnet-0)
+  - [6. Agregasi Hasil](#6-agregasi-hasil-aggregate_seedspy)
+  - [7. Uji Signifikansi Statistik](#7-uji-signifikansi-statistik-significance_testpy)
+  - [8. Benchmark Kompleksitas](#8-benchmark-kompleksitas-complexity_benchmarkpy)
+  - [9. Figur Confusion Matrix](#9-figur-confusion-matrix-plot_confusion_matricespy)
+  - [10. Monitoring Training](#10-monitoring-training)
+  - [11. Evaluasi In-Domain](#11-evaluasi-in-domain)
+  - [12. Evaluasi Eksternal C-NMC 2019](#12-evaluasi-eksternal-c-nmc-2019-evaluate_externalpy)
 - [Stain Normalization](#stain-normalization)
-- [Eksperimen &amp; Konfigurasi](#eksperimen--konfigurasi)
 - [Output &amp; Checkpoint](#output--checkpoint)
+- [Hyperparameter Lengkap](#hyperparameter-lengkap)
 - [Troubleshooting](#troubleshooting)
 - [Referensi](#referensi)
 
@@ -37,14 +47,16 @@ dan bergantung pada keahlian patologis.
 
 Proyek ini mengimplementasikan sistem klasifikasi otomatis berbasis:
 
-- **ConvNeXt V2 Tiny** — backbone pretrained FCMAE + IN22k + IN1k (28.5 M params)
-- **Multi-Head Self-Attention** — injeksi perhatian spasial setelah stage backbone (opsional; terbukti
+- **ConvNeXt V2 Tiny** — backbone pretrained FCMAE + IN22k + IN1k (~28.5 M params)
+- **Multi-Head Self-Attention (MHA)** — injeksi perhatian spasial setelah stage backbone (opsional; terbukti
   memperburuk generalisasi lintas-domain pada dataset kecil ini, lihat [experiment_results.md](experiment_results.md))
 - **FocusAugMix** — mixing augmentation berbasis SLIC superpixel + saliency + Grad-CAM
 - **ReinhardJitter (train-time stain augmentation)** — randomisasi statistik warna LAB saat training;
   **kontribusi utama** yang menghasilkan model paling robust lintas-domain (`focusmix_stain`)
 - **Weighted Focal Loss** — Focal Loss (γ=2.0) + inverse-frequency class weights untuk menangani imbalance
 - **Stain Normalization** — Macenko & Reinhard untuk evaluasi lintas-domain (test-time)
+- **Baseline CoAtNet-0** — backbone hybrid conv+attention + CutMix/Mixup, untuk perbandingan *fair*
+  dengan protokol training identik (lihat [experiment_results.md](experiment_results.md))
 
 > **Ringkasan temuan (divalidasi 3 seed):** kontribusi utama adalah **`focusmix_stain`** (FocusAugMix +
 > ReinhardJitter σ=0.15, tanpa MHA). Pada single-seed ia mencapai F1 lintas-domain 0.635, tetapi setelah
@@ -71,7 +83,7 @@ masuk ke satu split (tidak ada data leakage).
 
 Dataset PKG-C-NMC 2019 dari ISBI Challenge, dikumpulkan di India dengan protokol staining
 berbeda (Wright-Giemsa vs Giemsa ALL-IDB). Digunakan sebagai *external test set* untuk
-mengukur generalisasi lintas-domain.
+mengukur generalisasi lintas-domain (10.661 sel di `C-NMC_train_merged`).
 
 | Label          | Folder C-NMC | Setara ALL-IDB |
 | -------------- | ------------ | -------------- |
@@ -102,7 +114,7 @@ Gambar A (target) + Gambar B (source)
   Mixed Image + lambda (label mixing weight)
 ```
 
-Mode augmentasi: `none` | `saliency` | `focusmix` | `focusmix_cam`
+Mode augmentasi: `none` | `saliency` | `focusmix` | `focusmix_cam` (di `src/data_module.py`).
 
 ### Train-Time Stain Augmentation: ReinhardJitter
 
@@ -135,7 +147,7 @@ class_weights = inverse-frequency dari train set (otomatis, src/data_module.py:g
 Loss diterapkan kompatibel dengan label mixing FocusAugMix:
 `loss = λ·FL(target_a) + (1−λ)·FL(target_b)`, di mana λ adalah bobot mixing per-sampel.
 
-### Arsitektur Model
+### Arsitektur Model (Proposal)
 
 ```text
 Input (B, 3, 224, 224)
@@ -144,7 +156,7 @@ Input (B, 3, 224, 224)
 ConvNeXt V2 Tiny — pretrained fcmae_ft_in22k_in1k
    +-- Stage 0 -> (B,  96, 56, 56)
    +-- Stage 1 -> (B, 192, 28, 28)
-   +-- Stage 2 -> (B, 384, 14, 14)  [MHA disisipkan di sini (default)]
+   +-- Stage 2 -> (B, 384, 14, 14)  [MHA disisipkan di sini jika use_mha=True]
    |                  |
    |            tokens: (B, 196, 384)
    |            MultiheadAttention (8 heads) + Residual + LayerNorm
@@ -155,7 +167,23 @@ ConvNeXt V2 Tiny — pretrained fcmae_ft_in22k_in1k
 AdaptiveAvgPool2d(1) -> Flatten -> Dropout(0.3) -> Linear(num_classes)
 ```
 
-**Layer-wise Learning Rate Decay (LLRD, factor 0.75):**
+### Arsitektur Baseline (Pembanding)
+
+```text
+Input (B, 3, 224, 224)
+   |
+   v
+CoAtNet-0 (timm: coatnet_0_rw_224.sw_in1k, pretrained IN1k, global_pool='avg')
+   |
+   v
+Dropout(0.3) -> Linear(num_classes)
+```
+
+Baseline memakai **uniform LR fine-tuning** (tanpa LLRD) + **CutMix/Mixup level-batch**, tanpa
+ReinhardJitter dan tanpa MHA. Selain itu protokol training identik (epoch / wd / focal / warmup /
+clip / bf16). Implementasi: `CoAtNetClassifier` di `src/lightning_model.py`.
+
+**Layer-wise Learning Rate Decay (LLRD, factor 0.75 — hanya ConvNeXtV2):**
 
 | Layer      | LR multiplier  |
 | ---------- | -------------- |
@@ -192,42 +220,46 @@ sepanjang `max_epochs=30`.
 
 ```text
 LEUKIMIA/
-+-- src/
-|   +-- segment_dataset.py      # Preprocessing ALL-IDB raw -> dataset/
-|   +-- data_module.py          # Dataset, augmentasi, DataModule, external loader
-|   +-- lightning_model.py      # ConvNeXtV2Classifier, GradCAMExtractor, LightningModule
-|   +-- stain_normalize.py      # MacenkoNormalizer, ReinhardNormalizer
-|   +-- evaluate_external.py    # Evaluasi C-NMC 2019 dengan stain normalization
-|   +-- main.py                 # CLI training, experiment registry
-|
-+-- data/                       # Raw dataset (isi manual)
-|   +-- ALL_IDB1/
-|   |   +-- im/                 # Im001_1.jpg, Im002_0.jpg, ...
-|   |   +-- xyc/                # Im001_1.xyc (koordinat blast)
-|   +-- ALL_IDB2/
-|       +-- img/                # Im001_1.tif, Im002_0.tif, ...
-|
-+-- dataset/                    # Di-generate oleh segment_dataset.py
-|   +-- train/
-|   |   +-- Abnormal/           # ~600+ sel leukemia
-|   |   +-- Normal/             # ~200+ sel normal
-|   +-- val/
-|       +-- Abnormal/           # ~111 sel leukemia
-|       +-- Normal/             # ~93 sel normal
-|
-+-- checkpoints/                # Tersimpan otomatis saat training
-|   +-- focusmix_stain/
-|   |   +-- epoch=XX-val_f1=1.0000.ckpt
-|   |   +-- last.ckpt
-|   +-- no_mix/ ...
-|
-+-- logs/                       # CSV metrics
-|   +-- no_mix/version_0/metrics.csv
-|   +-- focusmix_stain/version_0/metrics.csv
-|
-+-- results/                    # JSON output evaluasi eksternal (per-exp + summary.json)
-+-- requirements.txt
-+-- README.md
+├── src/
+│   ├── segment_dataset.py         # Preprocessing ALL-IDB raw -> dataset/
+│   ├── data_module.py             # Dataset, FocusAugMix, ReinhardJitter, DataModule
+│   ├── lightning_model.py         # ConvNeXtV2Classifier, CoAtNetClassifier, CutMix/Mixup, GradCAM
+│   ├── stain_normalize.py         # MacenkoNormalizer, ReinhardNormalizer
+│   ├── main.py                    # CLI training + registry EXPERIMENTS
+│   ├── run_multiseed.py           # Training + evaluasi multi-seed (3 exp kunci × 3 seed)
+│   ├── aggregate_seeds.py         # Agregasi mean ± std lintas seed -> aggregate.{json,md}
+│   ├── significance_test.py       # Paired t-test + Wilcoxon + Cohen's d antar model
+│   ├── complexity_benchmark.py    # Params / FLOPs / latensi (ConvNeXtV2 vs CoAtNet-0)
+│   ├── plot_confusion_matrices.py # Figur CM kualitas-paper (PDF + PNG)
+│   └── evaluate_external.py       # Evaluasi C-NMC 2019 + stain normalization (+ TTA, ensemble)
+│
+├── data/                          # Raw dataset (isi manual)
+│   ├── ALL_IDB1/
+│   │   ├── im/                    # Im001_1.jpg, Im002_0.jpg, ...
+│   │   └── xyc/                   # Im001_1.xyc (koordinat blast)
+│   └── ALL_IDB2/
+│       └── img/                   # Im001_1.tif, Im002_0.tif, ...
+│
+├── dataset/                       # Di-generate oleh segment_dataset.py
+│   ├── train/{Abnormal,Normal}/
+│   └── val/{Abnormal,Normal}/
+│
+├── PKG_C_NMC 2019/                # External test (isi manual)
+│   └── C-NMC_train_merged/{all,hem}/
+│
+├── checkpoints/                   # Training single-run (main.py)
+├── checkpoints_multiseed/         # Training multi-seed ConvNeXtV2 (run_multiseed.py)
+├── checkpoints_coatnet/           # Training multi-seed baseline CoAtNet-0
+├── logs/  logs_multiseed/  logs_coatnet/         # CSV metrics per run
+├── results/                       # JSON evaluasi single-run
+├── results_multiseed/             # JSON + aggregate.{json,md} ConvNeXtV2 (no-TTA)
+├── results_multiseed_tta8/        # JSON + aggregate ablation TTA-8
+├── results_coatnet/               # JSON + aggregate baseline CoAtNet-0
+├── results_comparison/            # aggregate gabungan + significance.md + complexity.md
+├── figures/                       # cm_*.pdf / cm_*.png untuk paper
+├── experiment_results.md          # Hasil, analisis, protokol fair-comparison, temuan (doc tunggal)
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -250,9 +282,9 @@ cd LEUKIMIA
 ### Langkah 2 — Buat Virtual Environment
 
 ```bash
-# venv (Windows)
+# venv (Windows / PowerShell)
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\Activate.ps1
 
 # venv (Linux / macOS)
 python -m venv .venv
@@ -267,7 +299,7 @@ conda activate leukemia
 
 ```bash
 pip install -r requirements.txt
-pip install torchmetrics>=1.0.0   # tidak tercantum di requirements.txt, diperlukan oleh lightning_model.py
+pip install torchmetrics>=1.0.0   # diperlukan oleh lightning_model.py
 ```
 
 Untuk CUDA support (jika PyTorch terinstall tanpa CUDA):
@@ -276,17 +308,69 @@ Untuk CUDA support (jika PyTorch terinstall tanpa CUDA):
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
+Paket inti yang dipakai: `torch`, `torchvision`, `lightning`, `timm`, `torchmetrics`,
+`scikit-image` (SLIC), `opencv-python` (warna/HSV), `scikit-learn` (metrik), `scipy` (uji statistik),
+`matplotlib` (figur), `tqdm`, `Pillow`, `numpy`.
+
 ### Langkah 4 — Verifikasi
 
 ```bash
 python -c "import torch; print('PyTorch', torch.__version__, '| CUDA:', torch.cuda.is_available())"
-python -c "import lightning; print('Lightning', lightning.__version__)"
-python -c "import timm; print('timm', timm.__version__)"
+python -c "import lightning, timm, torchmetrics; print('lightning', lightning.__version__, '| timm', timm.__version__)"
+python -c "import cv2, skimage, sklearn, scipy, matplotlib; print('cv/skimage/sklearn/scipy/mpl OK')"
 ```
 
 ---
 
-## Alur Kerja Lengkap
+## Reproduksi Lengkap (TL;DR)
+
+Urutan command minimal untuk mereproduksi **seluruh** hasil paper, dijalankan **dari root proyek**.
+Skrip multi-seed/agregasi/figur otomatis `chdir` ke root, jadi aman dipanggil sebagai `python src/...`.
+
+```bash
+# 0. Preprocessing ALL-IDB mentah -> dataset/train, dataset/val
+python src/segment_dataset.py        # (dijalankan dari src/, lihat catatan di bawah)
+
+# 1. Proposal + baseline ConvNeXtV2: 3 eksperimen kunci × 3 seed (training + eval C-NMC, no-TTA)
+python src/run_multiseed.py
+
+# 2. Baseline CoAtNet-0 × 3 seed (artefak DIPISAH agar tidak tercampur ConvNeXtV2)
+python src/run_multiseed.py --exps coatnet_0 \
+    --ckpt-root checkpoints_coatnet --log-root logs_coatnet --results-root results_coatnet
+
+# 3. (Opsional) Ablation TTA-8 di checkpoint yang sudah ada — tanpa latih ulang
+python src/run_multiseed.py --tta-n 8 --no-train --results-root results_multiseed_tta8
+
+# 4. Agregasi mean ± std. Gabungkan ConvNeXtV2 + CoAtNet ke satu tabel perbandingan
+python src/aggregate_seeds.py --results-dir results_multiseed
+python src/aggregate_seeds.py --results-dir results_multiseed results_coatnet --out-dir results_comparison
+python src/aggregate_seeds.py --results-dir results_multiseed_tta8     # tabel ablation TTA
+
+# 5. Uji signifikansi statistik antar model (paired t-test + Wilcoxon + Cohen's d)
+python src/significance_test.py
+
+# 6. Benchmark kompleksitas (params / FLOPs / latensi)
+python src/complexity_benchmark.py
+
+# 7. Figur confusion matrix untuk paper (PDF + PNG)
+python src/plot_confusion_matrices.py
+```
+
+Artefak akhir yang dihasilkan:
+
+| Artefak                                          | Dihasilkan oleh                |
+| ------------------------------------------------ | ------------------------------ |
+| `results_multiseed/aggregate.{json,md}`          | `aggregate_seeds.py`           |
+| `results_coatnet/aggregate.{json,md}`            | `aggregate_seeds.py`           |
+| `results_comparison/aggregate.{json,md}`         | `aggregate_seeds.py` (gabung)  |
+| `results_comparison/significance.md`             | `significance_test.py`         |
+| `results_comparison/complexity.md`               | `complexity_benchmark.py`      |
+| `figures/cm_no_norm_3models.{pdf,png}`           | `plot_confusion_matrices.py`   |
+| `figures/cm_focusmix_stain_conditions.{pdf,png}` | `plot_confusion_matrices.py`   |
+
+---
+
+## Alur Kerja Detail
 
 ### 1. Persiapan Data
 
@@ -295,8 +379,7 @@ python -c "import timm; print('timm', timm.__version__)"
 - https://scotti.di.unimi.it/all/
 
 ```bash
-mkdir -p data/ALL_IDB1/im data/ALL_IDB1/xyc
-mkdir -p data/ALL_IDB2/img
+mkdir -p data/ALL_IDB1/im data/ALL_IDB1/xyc data/ALL_IDB2/img
 
 cp /path/to/ALL_IDB1/im/*.jpg   data/ALL_IDB1/im/
 cp /path/to/ALL_IDB1/xyc/*.xyc  data/ALL_IDB1/xyc/
@@ -305,94 +388,267 @@ cp /path/to/ALL_IDB2/img/*.tif  data/ALL_IDB2/img/
 
 #### Jalankan Segmentasi
 
+`segment_dataset.py` memakai path relatif (`data/`, `dataset/`) sehingga dijalankan dari `src/`:
+
 ```bash
 cd src
 python segment_dataset.py
+cd ..
 ```
 
 Script akan:
 
-1. Membaca ALL-IDB1 — crop sel abnormal (dari koordinat `.xyc`) + deteksi normal (HSV thresholding)
-2. Membaca ALL-IDB2 — salin sel individu ke folder yang sesuai
+1. Membaca ALL-IDB1 — crop sel abnormal (dari koordinat `.xyc`) + deteksi normal (HSV thresholding
+   karena `.xyc` healthy donor kosong)
+2. Membaca ALL-IDB2 — salin sel individu, resize ke 257×257
 3. Split 80/20 per-gambar (tidak ada leakage)
-4. Output ke `../dataset/`
+4. Output ke `dataset/train` & `dataset/val`
 
-Output yang diharapkan:
-
-```text
-=== ALL-IDB1 ===
-  Splitting 108 images: 86 train / 22 val
-  Abnormal train: 320 cells  |  val: 80 cells
-  Normal   train:  80 cells  |  val: 20 cells
-
-=== ALL-IDB2 ===
-  Abnormal train:  52 cells  |  val: 13 cells
-  Normal   train: 104 cells  |  val: 26 cells
-
-=== Summary ===
-  Train : 556 images  (Abnormal: 372, Normal: 184)
-  Val   : 139 images  (Abnormal:  93, Normal:  46)
-```
+> **Catatan:** script meng-`rmtree` `dataset/` di awal lalu membangun ulang. Jangan letakkan data lain di sana.
 
 ---
 
-### 2. Training
+### 2. Training Satu Eksperimen
 
-Semua command dijalankan dari direktori `src/`.
+`main.py` dijalankan dari `src/` (path data relatif default `dataset`).
 
 ```bash
 cd src
-```
 
-#### Jalankan Satu Eksperimen
-
-```bash
-# Eksperimen terbaik / proposal utama
+# Proposal utama
 python main.py --exp focusmix_stain
 
-# Eksperimen lain
-python main.py --exp no_mix
-python main.py --exp no_mix_mha
-python main.py --exp saliency
-python main.py --exp focusmix
-python main.py --exp focusmix_mha
-python main.py --exp focusmix_mha_strong
-python main.py --exp focusmix_cam
-python main.py --exp focusmix_stain_strong
-python main.py --exp focusmix_stain_max
-
-# Dengan seed tertentu dan direktori data kustom
+# Seed & data-dir kustom
 python main.py --exp focusmix_stain --seed 123 --data-dir ../dataset
-```
 
-#### Jalankan Semua Eksperimen Berurutan
-
-```bash
+# Semua eksperimen berurutan (termasuk baseline coatnet_0)
 python main.py --all
 ```
 
-Progress dan metrics ditampilkan real-time di terminal. Checkpoint terbaik (berdasarkan `val_f1`) disimpan otomatis.
+Argumen `main.py`:
+
+| Argumen      | Default      | Keterangan                                         |
+| ------------ | ------------ | -------------------------------------------------- |
+| `--exp`      | `focusmix`   | Nama eksperimen dari registry `EXPERIMENTS`        |
+| `--data-dir` | `dataset`    | Folder berisi `train/` dan `val/`                  |
+| `--seed`     | `42`         | Random seed                                        |
+| `--all`      | (flag)       | Jalankan semua eksperimen berurutan                |
+
+Checkpoint terbaik (monitor `val_f1`) + `last.ckpt` disimpan ke `checkpoints/<exp>/`.
+Di akhir training otomatis dijalankan `trainer.validate` pada checkpoint terbaik.
 
 ---
 
-### 3. Monitoring
+### 3. Daftar Eksperimen
+
+Sebelas eksperimen terdaftar di `EXPERIMENTS` (`src/main.py`). **`focusmix_stain` adalah proposal utama**;
+`coatnet_0` adalah **baseline pembanding fair**.
+
+| Eksperimen                | Backbone     | MHA | aug_mode       | Mixing batch  | Stain aug (σ_mean/prob) | F1 lintas-domain¹ | Tujuan                          |
+| ------------------------- | ------------ | --- | -------------- | ------------- | ----------------------- | :---------------: | ------------------------------- |
+| `no_mix`                  | ConvNeXtV2   | No  | `none`         | –             | –                       | 0.540             | Baseline (augmentasi dasar)     |
+| `no_mix_mha`              | ConvNeXtV2   | Yes | `none`         | –             | –                       | 0.266             | Isolasi kontribusi MHA          |
+| `saliency`                | ConvNeXtV2   | No  | `saliency`     | –             | –                       | 0.546             | SaliencyMix murni               |
+| `focusmix`                | ConvNeXtV2   | No  | `focusmix`     | –             | –                       | 0.424             | FocusAugMix murni               |
+| `focusmix_mha`            | ConvNeXtV2   | Yes | `focusmix`     | –             | –                       | 0.338             | FocusAugMix + MHA               |
+| `focusmix_mha_strong`     | ConvNeXtV2   | Yes | `focusmix`     | –             | – (paste 0.30)          | 0.434             | FocusAugMix + MHA, paste besar  |
+| `focusmix_cam`            | ConvNeXtV2   | Yes | `focusmix_cam` | –             | –                       | 0.433             | + Grad-CAM online               |
+| **`focusmix_stain`**      | ConvNeXtV2   | No  | `focusmix`     | –             | 0.15 / 0.5              | **0.635**         | **Proposal — terbaik**          |
+| `focusmix_stain_strong`   | ConvNeXtV2   | No  | `focusmix`     | –             | 0.25 / 0.7              | 0.413             | Stain aug kuat                  |
+| `focusmix_stain_max`      | ConvNeXtV2   | No  | `focusmix`     | –             | 0.35 / 0.8              | 0.506             | Stain aug maksimal              |
+| `coatnet_0`               | CoAtNet-0    | No  | `none`         | CutMix/Mixup  | –                       | (3-seed)          | **Baseline pembanding**         |
+
+> ¹ F1 macro pada C-NMC no-norm, threshold 0.5, **single-seed (42)** — kolom ini adalah ablation lengkap.
+> **Angka headline = mean ± std atas 3 seed** untuk tiga eksperimen kunci (`no_mix` 0.5636 ± 0.0817,
+> `focusmix_stain` 0.5535 ± 0.1189, `focusmix` 0.3486 ± 0.1405) — lihat
+> [experiment_results.md](experiment_results.md).
+
+#### Menambah Eksperimen Baru
+
+Edit `EXPERIMENTS` di `src/main.py`:
+
+```python
+EXPERIMENTS['my_exp'] = ExperimentConfig(
+    name='my_exp',
+    aug_mode='focusmix',
+    use_mha=True,
+    mha_stage=3,       # coba MHA di stage terakhir (7x7 tokens)
+    paste_ratio=0.30,
+    lr=5e-5,
+)
+```
+
+```bash
+python main.py --exp my_exp
+```
+
+---
+
+### 4. Validasi Multi-Seed (`run_multiseed.py`)
+
+Melatih tiap (eksperimen, seed) ke direktori terpisah, lalu menjalankan evaluasi C-NMC dan menyimpan
+**satu JSON per (eksperimen, seed)** dengan field `seed`/`exp` yang siap diagregasi.
+
+Default: `KEY_EXPERIMENTS = ['focusmix_stain', 'no_mix', 'focusmix']` × `SEEDS = [42, 123, 2025]`,
+TTA-1 (no-TTA, headline).
+
+```bash
+# Dari root proyek — 3 exp kunci × 3 seed
+python src/run_multiseed.py
+
+# Satu eksperimen saja
+python src/run_multiseed.py --exps focusmix_stain
+
+# Subset seed
+python src/run_multiseed.py --seeds 42 123
+
+# Lewati run yang checkpoint/JSON-nya sudah ada
+python src/run_multiseed.py --skip-existing
+
+# Hanya evaluasi checkpoint yang ada (tanpa latih ulang)
+python src/run_multiseed.py --no-train
+
+# Ablation TTA-8 di checkpoint yang ada -> folder terpisah agar tidak menimpa headline
+python src/run_multiseed.py --tta-n 8 --no-train --results-root results_multiseed_tta8
+```
+
+Argumen lengkap:
+
+| Argumen           | Default                                | Keterangan                                              |
+| ----------------- | -------------------------------------- | ------------------------------------------------------- |
+| `--exps`          | `focusmix_stain no_mix focusmix`       | Daftar eksperimen (dari registry)                       |
+| `--seeds`         | `42 123 2025`                          | Daftar seed                                             |
+| `--data-dir`      | `dataset`                              | Folder ALL-IDB                                          |
+| `--cnmc-dir`      | `PKG_C_NMC 2019/C-NMC_train_merged`    | Folder C-NMC berlabel                                   |
+| `--tta-n`         | `1`                                    | 1 = no-TTA (headline); 8 = ablation                     |
+| `--results-root`  | `results_multiseed`                    | Folder output JSON                                      |
+| `--ckpt-root`     | `checkpoints_multiseed`                | Folder checkpoint per-run                               |
+| `--log-root`      | `logs_multiseed`                       | Folder CSV log per-run                                  |
+| `--no-train`      | (flag)                                 | Lewati training                                         |
+| `--no-eval`       | (flag)                                 | Lewati evaluasi                                         |
+| `--skip-existing` | (flag)                                 | Lewati run yang checkpoint/JSON-nya sudah ada           |
+
+Output: `checkpoints_multiseed/<exp>_seed<seed>/`, `logs_multiseed/<exp>_seed<seed>/`,
+`results_multiseed/<exp>_seed<seed>.json`, dan `results_multiseed/manifest.json`.
+
+---
+
+### 5. Baseline CoAtNet-0
+
+Untuk perbandingan **fair**, baseline dilatih dengan skrip yang sama tetapi artefaknya **dipisah**
+ke folder tersendiri (agar tidak tercampur dengan ConvNeXtV2):
+
+```bash
+python src/run_multiseed.py --exps coatnet_0 \
+    --ckpt-root checkpoints_coatnet \
+    --log-root  logs_coatnet \
+    --results-root results_coatnet
+```
+
+Ini menghasilkan `results_coatnet/coatnet_0_seed{42,123,2025}.json` yang nanti ikut teragregasi oleh
+`aggregate_seeds.py` saat folder ini disertakan. Detail protokol: [experiment_results.md](experiment_results.md).
+
+---
+
+### 6. Agregasi Hasil (`aggregate_seeds.py`)
+
+Membaca semua `<exp>_seed<seed>.json`, menghitung **mean ± std** F1 macro & accuracy lintas seed per
+kondisi (no-norm / Macenko / Reinhard), menurunkan recall per-kelas dari confusion matrix, lalu menulis
+`aggregate.json` + `aggregate.md`.
+
+```bash
+# Hanya ConvNeXtV2 (no-TTA)
+python src/aggregate_seeds.py --results-dir results_multiseed
+
+# Gabungkan ConvNeXtV2 + CoAtNet ke satu tabel perbandingan
+python src/aggregate_seeds.py --results-dir results_multiseed results_coatnet \
+    --out-dir results_comparison
+
+# Tabel ablation TTA-8
+python src/aggregate_seeds.py --results-dir results_multiseed_tta8
+```
+
+| Argumen        | Default               | Keterangan                                                |
+| -------------- | --------------------- | --------------------------------------------------------- |
+| `--results-dir`| `results_multiseed`   | Satu/lebih folder hasil per-seed untuk digabung           |
+| `--out-dir`    | folder pertama        | Folder output `aggregate.{json,md}`                       |
+
+---
+
+### 7. Uji Signifikansi Statistik (`significance_test.py`)
+
+Paired t-test + Wilcoxon signed-rank + Cohen's d berpasangan atas F1 macro per-seed (42/123/2025),
+membaca JSON yang sama dengan agregasi. Membandingkan proposal vs baseline (CoAtNet-0, `no_mix`, `focusmix`).
+
+```bash
+python src/significance_test.py                          # kondisi cnmc_no_norm (default)
+python src/significance_test.py --condition cnmc_reinhard
+python src/significance_test.py --condition cnmc_macenko
+```
+
+| Argumen       | Default                                  | Keterangan                                        |
+| ------------- | ---------------------------------------- | ------------------------------------------------- |
+| `--condition` | `cnmc_no_norm`                           | `cnmc_no_norm` / `cnmc_macenko` / `cnmc_reinhard` |
+| `--out`       | `results_comparison/significance.md`     | Tabel markdown output                             |
+
+> **Catatan:** n=3 seed → daya uji rendah. Wilcoxon n=3 tak pernah mencapai p<0.25. Baca paired t-test +
+> Cohen's d (d>0.8 = efek besar) sebagai indikator utama, bukan p Wilcoxon. Memerlukan `results_coatnet/`
+> sudah terisi (langkah 5).
+
+---
+
+### 8. Benchmark Kompleksitas (`complexity_benchmark.py`)
+
+Membandingkan **params / FLOPs / GMACs / latensi** ConvNeXtV2-Tiny (proposal, tanpa MHA) vs CoAtNet-0
+(baseline) pada input 224×224. Tidak butuh checkpoint (pakai bobot acak; metrik tak bergantung nilai bobot).
+
+```bash
+python src/complexity_benchmark.py
+python src/complexity_benchmark.py --iters 100 --device cuda
+```
+
+| Argumen    | Default                              | Keterangan                                   |
+| ---------- | ------------------------------------ | -------------------------------------------- |
+| `--iters`  | `50`                                 | Iterasi pengukuran latensi (batch=1)         |
+| `--device` | `auto`                               | `auto` / `cpu` / `cuda`                      |
+| `--out`    | `results_comparison/complexity.md`   | Tabel markdown output                        |
+
+---
+
+### 9. Figur Confusion Matrix (`plot_confusion_matrices.py`)
+
+Merata-ratakan confusion matrix lintas seed (C-NMC = sel yang sama tiap seed) lalu memplot heatmap
+row-normalized (recall) kualitas-paper. Menghasilkan PDF (LaTeX) + PNG (pratinjau).
+
+```bash
+python src/plot_confusion_matrices.py
+```
+
+Output:
+
+- `figures/cm_no_norm_3models.{pdf,png}` — CoAtNet-0 vs ConvNeXtV2 `no_mix` vs `focusmix_stain` (no-norm)
+- `figures/cm_focusmix_stain_conditions.{pdf,png}` — proposal pada 3 kondisi (No-norm / Macenko / Reinhard)
+
+> Memerlukan `results_multiseed/` dan `results_coatnet/` sudah terisi (langkah 1, 2, 5).
+
+---
+
+### 10. Monitoring Training
 
 #### CSV Logs (Default)
 
-File metrics tersimpan di `logs/<exp_name>/version_0/metrics.csv`.
+File metrics tersimpan di `logs/<exp>/version_0/metrics.csv` (atau `logs_multiseed/...` untuk multi-seed).
 
-Kolom yang tersedia di CSV:
-
-| Kolom             | Keterangan                         |
-| ----------------- | ---------------------------------- |
-| `train_loss`      | Loss per step                      |
-| `train_loss_epoch`| Loss rata-rata per epoch           |
-| `val_loss`        | Validation loss                    |
-| `val_acc`         | Validation accuracy                |
-| `val_f1`          | F1 macro                           |
-| `val_precision`   | Precision macro                    |
-| `val_recall`      | Recall macro                       |
-| `lr-AdamW`        | Learning rate head/MHA per epoch   |
+| Kolom              | Keterangan                         |
+| ------------------ | ---------------------------------- |
+| `train_loss`       | Loss per step                      |
+| `train_loss_epoch` | Loss rata-rata per epoch           |
+| `val_loss`         | Validation loss                    |
+| `val_acc`          | Validation accuracy                |
+| `val_f1`           | F1 macro                           |
+| `val_precision`    | Precision macro                    |
+| `val_recall`       | Recall macro                       |
+| `lr-AdamW`         | Learning rate head/MHA per epoch   |
 
 Plot training curve:
 
@@ -400,58 +656,42 @@ Plot training curve:
 import pandas as pd
 import matplotlib.pyplot as plt
 
-df = pd.read_csv('../logs/focusmix_stain/version_0/metrics.csv')
-
+df = pd.read_csv('logs/focusmix_stain/version_0/metrics.csv')
 train = df.dropna(subset=['train_loss_epoch'])
 val   = df.dropna(subset=['val_loss'])
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
 axes[0].plot(train['epoch'], train['train_loss_epoch'], label='train loss')
 axes[0].plot(val['epoch'],   val['val_loss'],           label='val loss')
 axes[0].set_title('Loss'); axes[0].legend()
-
 axes[1].plot(val['epoch'], val['val_acc'], color='green', label='val acc')
 axes[1].set_title('Val Accuracy'); axes[1].legend()
-
-plt.tight_layout()
-plt.savefig('training_curve.png', dpi=150)
-plt.show()
+plt.tight_layout(); plt.savefig('training_curve.png', dpi=150)
 ```
 
 #### TensorBoard (Opsional)
 
-Edit satu baris di `src/main.py`:
+Ganti logger di `src/main.py`:
 
 ```python
-# Ganti:
-logger = CSVLogger('logs', name=cfg.name)
-
-# Dengan:
 from lightning.pytorch.loggers import TensorBoardLogger
-logger = TensorBoardLogger('logs', name=cfg.name)
+logger = TensorBoardLogger('logs', name=run_name)
 ```
 
-Kemudian:
-
 ```bash
-tensorboard --logdir=../logs
-# Buka: http://localhost:6006
+tensorboard --logdir=logs   # buka http://localhost:6006
 ```
 
 ---
 
-### 4. Evaluasi In-Domain
+### 11. Evaluasi In-Domain
 
-Evaluasi pada validation set ALL-IDB menggunakan checkpoint terbaik.
-Ini dijalankan otomatis di akhir setiap training, bisa juga dijalankan manual:
+Evaluasi pada validation set ALL-IDB. Otomatis berjalan di akhir training; bisa juga manual:
 
 ```bash
 cd src
-
 python - << 'EOF'
-import torch
-import numpy._core.multiarray
+import torch, numpy._core.multiarray
 torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
 
 import lightning as L
@@ -461,134 +701,103 @@ from data_module import LeukemiaDataModule
 ckpt = '../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt'
 model = LeukemiaLightningModel.load_from_checkpoint(ckpt)
 
-dm = LeukemiaDataModule(data_dir='../dataset', batch_size=32)
-dm.setup()
-
-trainer = L.Trainer(
-    accelerator='auto', devices=1,
-    logger=False, enable_checkpointing=False
-)
+dm = LeukemiaDataModule(data_dir='../dataset', batch_size=32); dm.setup()
+trainer = L.Trainer(accelerator='auto', devices=1, logger=False, enable_checkpointing=False)
 trainer.validate(model, datamodule=dm)
 EOF
 ```
 
 ---
 
-### 5. Evaluasi Eksternal C-NMC 2019
+### 12. Evaluasi Eksternal C-NMC 2019 (`evaluate_external.py`)
 
 #### Download C-NMC 2019
 
-- https://faspex.cancerimagingarchive.net/aspera/faspex/public/package?context=eyJyZXNvdXJjZSI6InBhY2thZ2VzIiwidHlwZSI6ImV4dGVybmFsX2Rvd25sb2FkX3BhY2thZ2UiLCJpZCI6IjczNCIsInBhc3Njb2RlIjoiNDM3ZmMzM2RkMzQ1ZmMzZjNjM2FlY2JmZWQ0MThlY2NjYTkzM2RmMiIsInBhY2thZ2VfaWQiOiI3MzQiLCJlbWFpbCI6ImhlbHBAY2FuY2VyaW1hZ2luZ2FyY2hpdmUubmV0In0=&redirected=true&authenticated=true
+- https://www.cancerimagingarchive.net/collection/c-nmc-2019/
 
 #### Struktur Direktori C-NMC
 
-Gunakan `C-NMC_train_merged` — satu-satunya split yang memiliki label kelas publik.
-Split test (prelim & final) berisi file flat tanpa label sehingga tidak dapat dievaluasi.
+Gunakan `C-NMC_train_merged` — satu-satunya split dengan label kelas publik. Split test (prelim & final)
+berisi file flat tanpa label sehingga tidak dapat dievaluasi.
 
 ```text
 PKG_C_NMC 2019/
-+-- C-NMC_train_merged/
-|   +-- all/          <- sel ALL (leukemia)  [pemetaan: Abnormal]
-|   +-- hem/          <- sel HEM (normal)    [pemetaan: Normal]
-+-- C-NMC_training_data/
-|   +-- fold_0/all/ hem/
-|   +-- fold_1/all/ hem/
-|   +-- fold_2/all/ hem/
-+-- C-NMC_test_prelim_phase_data/   <- flat files, tanpa label (tidak bisa dievaluasi)
-+-- C-NMC_test_final_phase_data/    <- flat files, tanpa label (tidak bisa dievaluasi)
+├── C-NMC_train_merged/
+│   ├── all/          <- sel ALL (leukemia)  [pemetaan: Abnormal]
+│   └── hem/          <- sel HEM (normal)    [pemetaan: Normal]
+├── C-NMC_training_data/{fold_0,fold_1,fold_2}/{all,hem}/
+├── C-NMC_test_prelim_phase_data/   <- flat files, tanpa label (tidak bisa dievaluasi)
+└── C-NMC_test_final_phase_data/    <- flat files, tanpa label (tidak bisa dievaluasi)
 ```
 
-Format gambar yang didukung: `.jpg`, `.bmp`, `.png`, `.tif`
+Format gambar didukung: `.jpg`, `.jpeg`, `.bmp`, `.png`, `.tif`, `.tiff`.
+Layout kelas yang dikenali: `all/hem`, `Abnormal/Normal`, `ALL/HEM`, `positive/negative`.
 
-#### Jalankan Evaluasi — Auto Mode (semua eksperimen sekaligus)
+#### Mode Auto (semua eksperimen di `checkpoints/` sekaligus)
 
 ```bash
-# dari root direktori proyek
 python src/evaluate_external.py \
     --cnmc-dir "PKG_C_NMC 2019/C-NMC_train_merged" \
     --data-dir dataset
 ```
 
-#### Jalankan Evaluasi — Single Model
+#### Mode Single Model
 
 ```bash
 cd src
-
 python evaluate_external.py \
-    --ckpt      ../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt \
-    --cnmc-dir  "../PKG_C_NMC 2019/C-NMC_train_merged" \
-    --data-dir  ../dataset \
+    --ckpt        ../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt \
+    --cnmc-dir    "../PKG_C_NMC 2019/C-NMC_train_merged" \
+    --data-dir    ../dataset \
     --output-json ../results/cnmc_eval_focusmix_stain.json
 ```
 
-Script akan menjalankan **4 kondisi** secara berurutan:
+#### Mode Ensemble & TTA
 
-1. ALL-IDB val (in-domain, sebagai baseline)
-2. C-NMC tanpa normalisasi (raw domain shift)
-3. C-NMC + Macenko normalization
-4. C-NMC + Reinhard normalization
+```bash
+# Ensemble beberapa eksperimen
+python evaluate_external.py --ensemble focusmix_stain no_mix focusmix \
+    --cnmc-dir "../PKG_C_NMC 2019/C-NMC_train_merged"
+
+# Test-Time Augmentation 8 view
+python evaluate_external.py --ckpt <ckpt> --cnmc-dir <dir> --tta-n 8
+```
+
+Tiap evaluasi menjalankan hingga **4 kondisi**: ALL-IDB val (in-domain), C-NMC no-norm, C-NMC + Macenko,
+C-NMC + Reinhard, plus threshold terkalibrasi.
 
 #### Argumen Lengkap
 
-```text
---ckpt            Path ke file .ckpt  (wajib)
---cnmc-dir        Direktori C-NMC berlabel, berisi all/ dan hem/  (wajib)
---data-dir        Direktori dataset ALL-IDB  (default: ../dataset)
---batch-size      Batch size inference  (default: 32)
---num-workers     Worker DataLoader  (default: 4; gunakan 0 jika hang)
---image-size      Ukuran resize gambar  (default: 224)
---ref-samples     Gambar training untuk hitung referensi stain  (default: 100)
---device          auto / cpu / cuda  (default: auto)
---no-macenko      Skip Macenko normalization
---no-reinhard     Skip Reinhard normalization
---skip-val        Skip evaluasi ALL-IDB val
---output-json     Simpan semua metrics ke JSON
-```
-
-#### Contoh Cepat (Tanpa Normalisasi)
-
-```bash
-cd src
-
-python evaluate_external.py \
-    --ckpt     ../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt \
-    --cnmc-dir "../PKG_C_NMC 2019/C-NMC_train_merged" \
-    --no-macenko --no-reinhard
-```
+| Argumen          | Default        | Keterangan                                                    |
+| ---------------- | -------------- | ------------------------------------------------------------- |
+| `--ckpt`         | `None`         | Path satu `.ckpt`. Kosongkan untuk auto-scan `--ckpt-dir`     |
+| `--ckpt-dir`     | `checkpoints`  | Root folder berisi subdir per-eksperimen                      |
+| `--cnmc-dir`     | **(wajib)**    | Folder C-NMC berlabel (berisi `all/` dan `hem/`)              |
+| `--data-dir`     | `dataset`      | Folder ALL-IDB (untuk val + referensi stain)                 |
+| `--batch-size`   | `32`           | Batch inference                                               |
+| `--num-workers`  | `2`            | Worker DataLoader (gunakan `0` jika hang)                     |
+| `--image-size`   | `224`          | Ukuran resize                                                 |
+| `--ref-samples`  | `100`          | Gambar training untuk referensi stain                        |
+| `--device`       | `auto`         | `auto` / `cpu` / `cuda`                                       |
+| `--no-macenko`   | (flag)         | Skip Macenko                                                  |
+| `--no-reinhard`  | (flag)         | Skip Reinhard                                                 |
+| `--skip-val`     | (flag)         | Skip evaluasi ALL-IDB val                                     |
+| `--tta-n`        | `1`            | TTA passes (1 = nonaktif, 8 = direkomendasikan)              |
+| `--ensemble`     | `None`         | Daftar eksperimen untuk evaluasi ensemble                     |
+| `--output-json`  | `None`         | Simpan metrics single-model ke JSON                           |
+| `--results-dir`  | `results`      | Folder output JSON (mode auto)                                |
 
 #### Contoh Output
 
-Output berikut adalah hasil nyata dari eksperimen terbaik `focusmix_stain` pada `C-NMC_train_merged`
-(10.661 sel). Lihat analisis lengkap di [experiment_results.md](experiment_results.md).
+Hasil nyata `focusmix_stain` pada `C-NMC_train_merged` (10.661 sel):
 
 ```text
-────────────────────────────────────────────────────────────
-  ALL-IDB Val  .  In-Domain
-────────────────────────────────────────────────────────────
-  N samples  : 204
-  Accuracy   : 1.0000  (100.0%)
-  F1 (macro) : 1.0000
-
 ────────────────────────────────────────────────────────────
   C-NMC 2019  .  No Stain Normalization
 ────────────────────────────────────────────────────────────
   N samples  : 10661
   Accuracy   : 0.6581  (65.8%)
   F1 (macro) : 0.6351
-
-────────────────────────────────────────────────────────────
-  C-NMC 2019  .  Macenko Normalization
-────────────────────────────────────────────────────────────
-  N samples  : 10661
-  Accuracy   : 0.7057  (70.6%)
-  F1 (macro) : 0.6225
-
-────────────────────────────────────────────────────────────
-  C-NMC 2019  .  Reinhard Normalization
-────────────────────────────────────────────────────────────
-  N samples  : 10661
-  Accuracy   : 0.5606  (56.1%)
-  F1 (macro) : 0.5559
 
 ════════════════════════════════════════════════════════════
   SUMMARY
@@ -612,47 +821,9 @@ Output berikut adalah hasil nyata dari eksperimen terbaik `focusmix_stain` pada 
 | 0.05-0.10 | Ketergantungan staining moderat                                         |
 | > 0.10    | Ketergantungan staining signifikan; normalisasi sangat direkomendasikan |
 
-> **Catatan penting:** gap sendiri bisa menyesatkan pada data tidak seimbang. `saliency` punya gap
-> terkecil (0.291) tetapi recall Normal hanya 17% — model nyaris menebak "semua Abnormal". Selalu
-> baca gap **bersama** F1 macro dan recall per-kelas, bukan sendirian.
-
-#### Gap Per-Kelas: Recall Abnormal vs Normal
-
-Asimetri recall per kelas lebih informatif dari gap keseluruhan. Confusion matrix C-NMC (no-norm,
-threshold 0.5) menunjukkan tiga pola tergantung konfigurasi:
-
-| Pola              | Eksperimen                                          | Recall Abnormal | Recall Normal |
-| ----------------- | --------------------------------------------------- | :-------------: | :-----------: |
-| Bias → Abnormal   | `no_mix`, `saliency`                                | 88–96%          | 17–22%        |
-| Bias → Normal     | `no_mix_mha`, `focusmix`, `focusmix_mha`, `_cam`    | 2–27%           | 79–99%        |
-| **Seimbang**      | **`focusmix_stain`**                                | **67%**         | **64%**       |
-
-**Penyebab bias ke Abnormal (`no_mix`, `saliency`):**
-
-- Imbalance kelas training ALL-IDB (~2:1 Abnormal:Normal) mendorong model memilih Abnormal secara statistik.
-- Sel blast (Abnormal) memiliki ciri morfologi persisten lintas domain: inti besar, kromatin kasar,
-  rasio nukleus-sitoplasma tinggi — ciri ini relatif bertahan walau protokol pewarnaan berbeda.
-- Distribusi C-NMC (68% ALL, 32% HEM) membuat bias Abnormal terlihat "wajar" dari accuracy meski
-  recall Normal nyaris nol.
-
-**Penyebab bias ke Normal (eksperimen mixing/MHA tanpa stain aug):**
-
-- FocusAugMix mem-paste potongan superpixel antar gambar, menciptakan pola "tambal sulam" yang
-  tidak lazim. Model mengasosiasikan penampilan tidak seragam itu dengan Abnormal — tetapi di C-NMC,
-  sel blast terlihat uniform dan bersih, sehingga salah diprediksi Normal.
-- MHA memperkuat *spatial attention pattern* yang spesifik terhadap distribusi warna Giemsa ALL-IDB.
-  Saat domain bergeser, pola atensi ini kolaps ke prediksi Normal secara masif.
-
-**Mengapa `focusmix_stain` seimbang:**
-
-- ReinhardJitter saat training memaksa model invariant terhadap pergeseran statistik warna, sehingga
-  ia mengandalkan morfologi sel (yang lintas-domain) alih-alih warna (yang domain-spesifik). Hasilnya
-  recall kedua kelas seimbang **tanpa** normalisasi test-time.
-
-**Catatan klinis:** Dalam konteks medis, False Negative Abnormal (sel leukemia yang diprediksi
-Normal) jauh lebih berbahaya dari False Positive. Akurasi keseluruhan yang terlihat baik bisa
-menyembunyikan recall Abnormal yang sangat rendah — selalu periksa confusion matrix dan F1 per
-kelas, bukan hanya accuracy agregat.
+> **Catatan penting:** gap sendiri bisa menyesatkan pada data tidak seimbang. Selalu baca gap **bersama**
+> F1 macro dan recall per-kelas. Dalam konteks klinis, **False Negative Abnormal** (sel leukemia diprediksi
+> Normal) jauh lebih berbahaya dari False Positive — periksa confusion matrix, bukan hanya accuracy agregat.
 
 ---
 
@@ -660,19 +831,9 @@ kelas, bukan hanya accuracy agregat.
 
 ### Konsep
 
-Model yang dilatih di ALL-IDB (Giemsa, Italia) dan ditest di C-NMC (Wright-Giemsa, India)
-mengalami penurunan performa karena **distribusi warna berbeda**, bukan morfologi sel berbeda.
-Stain normalization memetakan C-NMC agar terlihat seperti ALL-IDB sebelum inference.
-
-```text
-C-NMC image (Wright-Giemsa)
-    |
-    v   MacenkoNormalizer.transform()
-Normalized (distribusi warna mendekati Giemsa ALL-IDB)
-    |
-    v   Model inference
-Prediction
-```
+Model dilatih di ALL-IDB (Giemsa, Italia), ditest di C-NMC (Wright-Giemsa, India) → penurunan performa
+karena **distribusi warna berbeda**, bukan morfologi sel. Stain normalization memetakan C-NMC agar
+terlihat seperti ALL-IDB sebelum inference.
 
 ### Macenko vs Reinhard
 
@@ -689,100 +850,80 @@ Prediction
 ```python
 import numpy as np
 from PIL import Image
-from stain_normalize import (
-    MacenkoNormalizer,
-    ReinhardNormalizer,
-    compute_reference_from_dir,
-)
+from stain_normalize import MacenkoNormalizer, ReinhardNormalizer, compute_reference_from_dir
 
 # Hitung referensi dari training set ALL-IDB (sekali saja)
-ref_image, rh_mean, rh_std = compute_reference_from_dir(
-    directory='../dataset/train',
-    n_samples=100,       # jumlah gambar yang disampling
-    image_size=224,
-)
+ref_image, rh_mean, rh_std = compute_reference_from_dir('../dataset/train', n_samples=100, image_size=224)
 
-# --- Macenko ---
-mac = MacenkoNormalizer(
-    luminosity_threshold=0.15,   # ambang batas untuk hapus background
-    angular_percentile=99,       # persentil untuk estimasi sudut stain
-)
-mac.fit(ref_image)               # fit ke satu gambar referensi ALL-IDB
-
+# Macenko
+mac = MacenkoNormalizer(luminosity_threshold=0.15, angular_percentile=99).fit(ref_image)
 cnmc_np = np.array(Image.open('cnmc_cell.jpg').convert('RGB'))
-normalized_mac = mac.transform(cnmc_np)   # HxWx3 uint8
+normalized_mac = mac.transform(cnmc_np)          # HxWx3 uint8
 
-# --- Reinhard ---
-rh = ReinhardNormalizer()
-rh.fit_from_stats(rh_mean, rh_std)        # fit dari statistik agregat dataset
-
-normalized_rh = rh.transform(cnmc_np)    # HxWx3 uint8
-
-# --- Atau fit dari satu gambar ---
-rh2 = ReinhardNormalizer().fit(ref_image)
-normalized_rh2 = rh2.transform(cnmc_np)
+# Reinhard (dari statistik agregat dataset)
+rh = ReinhardNormalizer().fit_from_stats(rh_mean, rh_std)
+normalized_rh = rh.transform(cnmc_np)            # HxWx3 uint8
 ```
 
 ---
 
-> **Hasil eksperimen lengkap, analisis val accuracy 100%, dan perbandingan lintas-domain**
-> tersedia di [experiment_results.md](experiment_results.md).
+## Output & Checkpoint
+
+### Load Checkpoint untuk Inference
+
+```python
+import torch, numpy._core.multiarray
+torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+
+from lightning_model import LeukemiaLightningModel
+from torchvision import transforms
+from PIL import Image
+
+model = LeukemiaLightningModel.load_from_checkpoint(
+    '../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt', map_location='cuda',
+)
+model.eval()
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224), antialias=True),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+
+img = transform(Image.open('cell.jpg').convert('RGB')).unsqueeze(0).cuda()
+with torch.no_grad():
+    pred = model(img).argmax(dim=1).item()
+print({0: 'Abnormal (ALL)', 1: 'Normal'}[pred])
+```
+
+### Resume Training
+
+Tambahkan `ckpt_path` di `trainer.fit()` (`src/main.py`):
+
+```python
+trainer.fit(model, datamodule=datamodule, ckpt_path='../checkpoints/focusmix_stain/last.ckpt')
+```
+
+### Export ke TorchScript
+
+```python
+model = LeukemiaLightningModel.load_from_checkpoint('best.ckpt').model
+scripted = torch.jit.trace(model, torch.randn(1, 3, 224, 224))
+torch.jit.save(scripted, 'leukemia_classifier.pt')
+```
 
 ---
 
-## Eksperimen & Konfigurasi
+## Hyperparameter Lengkap
 
-### Daftar Eksperimen
-
-Sepuluh eksperimen terdaftar di `EXPERIMENTS` (`src/main.py`), membentuk ablation atas mixing, MHA,
-dan stain augmentation. **`focusmix_stain` adalah model terbaik / proposal utama.**
-
-| Eksperimen                | MHA | aug_mode       | Stain aug (σ_mean/prob) | F1 lintas-domain | Tujuan                          |
-| ------------------------- | --- | -------------- | ----------------------- | :--------------: | ------------------------------- |
-| `no_mix`                  | No  | `none`         | –                       | 0.540            | Baseline (augmentasi dasar)     |
-| `no_mix_mha`              | Yes | `none`         | –                       | 0.266            | Isolasi kontribusi MHA          |
-| `saliency`                | No  | `saliency`     | –                       | 0.546            | SaliencyMix murni               |
-| `focusmix`                | No  | `focusmix`     | –                       | 0.424            | FocusAugMix murni               |
-| `focusmix_mha`            | Yes | `focusmix`     | –                       | 0.338            | FocusAugMix + MHA               |
-| `focusmix_mha_strong`     | Yes | `focusmix`     | – (paste 0.30)          | 0.434            | FocusAugMix + MHA, paste besar  |
-| `focusmix_cam`            | Yes | `focusmix_cam` | –                       | 0.433            | + Grad-CAM online               |
-| **`focusmix_stain`**      | No  | `focusmix`     | 0.15 / 0.5              | **0.635**        | **Proposal — terbaik**          |
-| `focusmix_stain_strong`   | No  | `focusmix`     | 0.25 / 0.7              | 0.413            | Stain aug kuat                  |
-| `focusmix_stain_max`      | No  | `focusmix`     | 0.35 / 0.8              | 0.506            | Stain aug maksimal              |
-
-> Kolom "F1 lintas-domain" = F1 macro pada C-NMC no-norm, threshold 0.5, **single-seed (42)**. Tabel ini
-> adalah ablation lengkap. **Angka headline = mean ± std atas 3 seed** untuk tiga eksperimen kunci
-> (`no_mix` 0.5636 ± 0.0817, `focusmix_stain` 0.5535 ± 0.1189, `focusmix` 0.3486 ± 0.1405) — lihat
-> bagian "Validasi Multi-Seed" di [experiment_results.md](experiment_results.md).
-
-### Multi-Seed & Ablation TTA (otomatis)
-
-Tiga eksperimen kunci divalidasi dengan 3 seed (42/123/2025). Tooling:
-
-```bash
-# Latih + evaluasi 3 eksperimen kunci × 3 seed (no-TTA, headline)
-python src/run_multiseed.py
-
-# Ablation TTA-8 di checkpoint yang sudah ada (tanpa latih ulang)
-python src/run_multiseed.py --tta-n 8 --no-train --results-root results_multiseed_tta8
-
-# Agregasi mean ± std + tabel markdown
-python src/aggregate_seeds.py --results-dir results_multiseed
-python src/aggregate_seeds.py --results-dir results_multiseed_tta8
-```
-
-Output: `results_multiseed/aggregate.{json,md}` (no-TTA) dan `results_multiseed_tta8/aggregate.{json,md}`
-(ablation TTA-8). `aggregate_seeds.py` bersifat umum — file per-seed CoAtNet (`coatnet_0_seed<seed>.json`)
-di folder yang sama akan ikut teragregasi untuk tabel perbandingan.
-
-### Hyperparameter Lengkap
+Semua dapat di-override per-eksperimen di `ExperimentConfig` (`src/main.py`).
 
 | Parameter            | Default | Deskripsi                                            |
 | -------------------- | ------- | ---------------------------------------------------- |
 | `batch_size`         | 32      | Turunkan ke 16 jika GPU OOM                          |
 | `lr`                 | 1e-4    | Base learning rate untuk head / MHA                  |
 | `weight_decay`       | 0.05    | AdamW weight decay                                   |
-| `llrd`               | 0.75    | Layer-wise LR decay factor per stage                 |
+| `llrd`               | 0.75    | Layer-wise LR decay factor (ConvNeXtV2 saja)         |
 | `label_smoothing`    | 0.0     | Label smoothing di CrossEntropy (default nonaktif)   |
 | `use_focal_loss`     | True    | Aktifkan Weighted Focal Loss                         |
 | `focal_gamma`        | 2.0     | Faktor fokus Focal Loss                              |
@@ -796,209 +937,68 @@ di folder yang sama akan ikut teragregasi untuk tabel perbandingan.
 | `stain_sigma_mean`   | 0.15    | Std perturbasi mean warna LAB (ReinhardJitter)       |
 | `stain_sigma_std`    | 0.10    | Std perturbasi kontras warna LAB                     |
 | `stain_aug_prob`     | 0.5     | Probabilitas penerapan ReinhardJitter per sampel     |
-
-### Menambah Eksperimen Baru
-
-Edit `EXPERIMENTS` di `src/main.py`:
-
-```python
-EXPERIMENTS['my_exp'] = ExperimentConfig(
-    name='my_exp',
-    aug_mode='focusmix',
-    use_mha=True,
-    mha_stage=3,       # coba MHA di stage terakhir (7x7 tokens)
-    paste_ratio=0.30,
-    lr=5e-5,
-)
-```
-
-```bash
-python main.py --exp my_exp
-```
-
----
-
-## Output & Checkpoint
-
-### Load Checkpoint untuk Inference
-
-```python
-import torch
-import numpy._core.multiarray
-torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
-
-from lightning_model import LeukemiaLightningModel
-from torchvision import transforms
-from PIL import Image
-
-# Load model
-model = LeukemiaLightningModel.load_from_checkpoint(
-    '../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt',
-    map_location='cuda',
-)
-model.eval()
-
-# Preprocessing
-transform = transforms.Compose([
-    transforms.Resize((224, 224), antialias=True),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
-
-# Inference
-img = transform(Image.open('cell.jpg').convert('RGB')).unsqueeze(0).cuda()
-with torch.no_grad():
-    pred = model(img).argmax(dim=1).item()
-
-print({0: 'Abnormal (ALL)', 1: 'Normal'}[pred])
-```
-
-### Inference dengan Stain Normalization
-
-```python
-import numpy as np
-from PIL import Image
-from stain_normalize import MacenkoNormalizer, compute_reference_from_dir
-
-# Fit normalizer ke training set ALL-IDB (sekali, simpan ke pickle jika perlu)
-ref_img, _, _ = compute_reference_from_dir('../dataset/train', n_samples=100)
-mac = MacenkoNormalizer().fit(ref_img)
-
-# Normalize gambar C-NMC sebelum inference
-cnmc_img = np.array(Image.open('cnmc_cell.bmp').convert('RGB'))
-normalized = mac.transform(cnmc_img)
-
-img_tensor = transform(Image.fromarray(normalized)).unsqueeze(0).cuda()
-with torch.no_grad():
-    pred = model(img_tensor).argmax(dim=1).item()
-```
-
-### Resume Training
-
-Edit `trainer.fit()` di `src/main.py`:
-
-```python
-trainer.fit(
-    model,
-    datamodule=datamodule,
-    ckpt_path='../checkpoints/focusmix_stain/last.ckpt',  # tambahkan ini
-)
-```
-
-### Export ke TorchScript
-
-```python
-model = LeukemiaLightningModel.load_from_checkpoint('best.ckpt').model
-scripted = torch.jit.trace(model, torch.randn(1, 3, 224, 224))
-torch.jit.save(scripted, 'leukemia_classifier.pt')
-```
+| `backbone`           | convnextv2 | `convnextv2` atau `coatnet`                       |
+| `mixing`             | none    | `none` atau `cutmix_mixup` (level-batch)             |
+| `cutmix_alpha`       | 1.0     | Beta(α,α) untuk CutMix                               |
+| `mixup_alpha`        | 0.2     | Beta(α,α) untuk Mixup                                |
+| `mix_prob`           | 0.5     | Probabilitas menerapkan CutMix/Mixup per batch       |
 
 ---
 
 ## Troubleshooting
 
-### `_pickle.UnpicklingError` saat load checkpoint (PyTorch >= 2.6)
+### `_pickle.UnpicklingError` saat load checkpoint (PyTorch ≥ 2.6)
 
 ```text
-Weights only load failed.
-GLOBAL numpy._core.multiarray.scalar was not an allowed global by default.
+Weights only load failed. GLOBAL numpy._core.multiarray.scalar was not an allowed global by default.
 ```
 
-**Penyebab:** PyTorch 2.6 mengubah default `weights_only=True`. Checkpoint menyimpan numpy
-scalar yang tidak ada di safe globals list.
-
-**Status:** Sudah diperbaiki di `main.py` dan `evaluate_external.py`.
-Jika error di script lain, tambahkan di bagian atas sebelum load:
+**Penyebab:** PyTorch 2.6 mengubah default `weights_only=True`. Sudah ditangani di `main.py` dan
+`evaluate_external.py`. Untuk script lain, tambahkan sebelum load:
 
 ```python
-import torch
-import numpy._core.multiarray
+import torch, numpy._core.multiarray
 torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
 ```
 
 ### CUDA Out of Memory
 
-```python
-# Di src/main.py, ubah ExperimentConfig:
-batch_size=16   # turunkan dari 32
-```
-
-Atau aktifkan gradient checkpointing:
-
-```python
-# Di lightning_model.py dalam __init__:
-self.model.backbone.set_grad_checkpointing(True)
-```
+Turunkan `batch_size=16` di `ExperimentConfig`, atau aktifkan gradient checkpointing di
+`lightning_model.py` (`__init__`): `self.model.backbone.set_grad_checkpointing(True)`.
 
 ### Training Sangat Lambat
 
-```bash
-# Kurangi DataLoader workers jika CPU bottleneck
-# Di LeukemiaDataModule: num_workers=8 (default)
-
-# Hindari focusmix_cam (Grad-CAM online paling lambat; num_workers dipaksa 0)
-python main.py --exp focusmix_stain   # jauh lebih cepat dari focusmix_cam
-
-# Matikan SLIC/mixing untuk cek overhead augmentasi
-python main.py --exp no_mix
-```
-
-### Segmentation Error `*.xyc not found`
-
-```bash
-ls data/ALL_IDB1/xyc/ | head -5
-# Harus ada: Im001_1.xyc  Im002_1.xyc  Im003_1.xyc ...
-```
+`focusmix_cam` (Grad-CAM online) paling lambat dan memaksa `num_workers=0`. Untuk kecepatan gunakan
+`focusmix_stain` atau `no_mix`.
 
 ### Macenko Hang / RuntimeError
 
-```bash
-# Jalankan dengan num_workers=0 (normalizer tidak picklable lintas proses)
-python evaluate_external.py \
-    --ckpt ../checkpoints/focusmix_stain/epoch=06-val_f1=1.0000.ckpt \
-    --cnmc-dir "../PKG_C_NMC 2019/C-NMC_train_merged" \
-    --num-workers 0
-
-# Jika masih crash, skip Macenko dan pakai Reinhard saja
-python evaluate_external.py ... --no-macenko
-```
+Normalizer tidak picklable lintas proses → jalankan dengan `--num-workers 0`. Jika masih crash, pakai
+`--no-macenko` (Reinhard saja).
 
 ### `No images found` pada C-NMC
 
-Penyebab paling umum: menggunakan split test (prelim/final) yang berisi flat files tanpa
-subdirektori kelas. Gunakan `C-NMC_train_merged` atau salah satu fold di `C-NMC_training_data`.
+Pastikan memakai `C-NMC_train_merged` (ada subdir `all/` dan `hem/`), bukan split test (flat files).
 
 ```bash
-# Benar — ada subdirektori all/ dan hem/
-ls "PKG_C_NMC 2019/C-NMC_train_merged/"
-# Output: all/  hem/
-
-# Salah — flat files tanpa label
-ls "PKG_C_NMC 2019/C-NMC_test_prelim_phase_data/"
-# Output: 1.bmp  2.bmp  3.bmp  ...  (tidak bisa dievaluasi)
+ls "PKG_C_NMC 2019/C-NMC_train_merged/"   # harus: all/  hem/
 ```
 
-Script mendukung layout `all/hem/`, `Abnormal/Normal/`, `ALL/HEM/`, `positive/negative/`.
+### `ModuleNotFoundError: stain_normalize` / `main`
 
-### `ModuleNotFoundError: stain_normalize`
-
-```bash
-# Selalu jalankan dari direktori src/
-cd src
-python evaluate_external.py ...   # BENAR
-
-# Bukan dari root:
-python src/evaluate_external.py ...  # salah (import akan gagal)
-```
+`main.py` dan `evaluate_external.py` single-mode mengandalkan import relatif → jalankan dari `src/`.
+Skrip `run_multiseed.py`, `aggregate_seeds.py`, `significance_test.py`, `complexity_benchmark.py`,
+`plot_confusion_matrices.py` otomatis `chdir` ke root dan menambah `src/` ke `sys.path` → aman dipanggil
+sebagai `python src/<script>.py` dari root.
 
 ### Early Stopping Terlalu Cepat
 
-Edit patience di `src/main.py`:
+Naikkan patience di `src/main.py`: `EarlyStopping(monitor='val_loss', mode='min', patience=15)`.
 
-```python
-EarlyStopping(monitor='val_loss', mode='min', patience=15),
-#                                                       ^^ naikkan dari 10
-```
+### `significance_test.py` / `plot_confusion_matrices.py` kosong atau error
+
+Keduanya membutuhkan hasil baseline. Jalankan langkah 5 (CoAtNet-0) sehingga `results_coatnet/` terisi
+sebelum menjalankan uji signifikansi & figur.
 
 ---
 
@@ -1010,18 +1010,12 @@ EarlyStopping(monitor='val_loss', mode='min', patience=15),
   *FocusAugMix: A data augmentation method for enhancing Acute Lymphoblastic Leukemia classification.*
   Intelligent Systems With Applications, 26, 200512.
   [https://doi.org/10.1016/j.iswa.2025.200512](https://doi.org/10.1016/j.iswa.2025.200512)
-- **ConvNeXt V2**: Woo S., et al. (2023).
-  *ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders.*
-  CVPR 2023.
-- **SaliencyMix**: Uddin A.F.M.S., et al. (2021).
-  *SaliencyMix: A Saliency Guided Data Augmentation Strategy for Better Regularization.*
-  ICLR 2021.
-- **Macenko Stain Normalization**: Macenko M., et al. (2009).
-  *A method for normalizing histology slides for quantitative analysis.*
-  ISBI 2009.
-- **Reinhard Color Transfer**: Reinhard E., et al. (2001).
-  *Color transfer between images.*
-  IEEE Computer Graphics and Applications, 21(5), 34-41.
+- **ConvNeXt V2**: Woo S., et al. (2023). *ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders.* CVPR 2023.
+- **CoAtNet**: Dai Z., et al. (2021). *CoAtNet: Marrying Convolution and Attention for All Data Sizes.* NeurIPS 2021.
+- **SaliencyMix**: Uddin A.F.M.S., et al. (2021). *SaliencyMix: A Saliency Guided Data Augmentation Strategy for Better Regularization.* ICLR 2021.
+- **CutMix**: Yun S., et al. (2019). *CutMix: Regularization Strategy to Train Strong Classifiers with Localizable Features.* ICCV 2019.
+- **Macenko Stain Normalization**: Macenko M., et al. (2009). *A method for normalizing histology slides for quantitative analysis.* ISBI 2009.
+- **Reinhard Color Transfer**: Reinhard E., et al. (2001). *Color transfer between images.* IEEE CG&A, 21(5), 34-41.
 
 ### Dataset
 
@@ -1044,4 +1038,4 @@ EarlyStopping(monitor='val_loss', mode='min', patience=15),
 
 ---
 
-Last updated: 2026-06-07
+Last updated: 2026-06-08

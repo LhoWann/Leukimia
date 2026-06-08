@@ -1,26 +1,3 @@
-"""
-Agregasi hasil multi-seed -> mean +/- std per eksperimen & kondisi.
-
-Membaca results_multiseed/<exp>_seed<seed>.json (output run_multiseed.py),
-menghitung mean/std F1 macro & accuracy lintas seed untuk tiap kondisi
-(no_norm, macenko, reinhard), menurunkan recall per-kelas dari confusion
-matrix, lalu menulis:
-
-    results_multiseed/aggregate.json   <- format ringkas (sesuai PERBANDINGAN_BASELINE.md #4)
-    results_multiseed/aggregate.md     <- tabel siap tempel ke laporan
-
-Skrip ini juga dapat mengagregasi hasil model lain (mis. CoAtNet) selama
-file JSON per-seed-nya mengikuti skema yang sama dan ada di folder yang sama.
-
-Jalankan dari root proyek (otomatis chdir):
-    python src/aggregate_seeds.py
-    python src/aggregate_seeds.py --results-dir results_multiseed
-
-Bisa menggabungkan beberapa folder hasil dalam satu tabel (mis. ConvNeXtV2 + CoAtNet
-yang disimpan terpisah). Output ditulis ke --out-dir (default: folder pertama):
-    python src/aggregate_seeds.py --results-dir results_multiseed results_coatnet \
-        --out-dir results_comparison
-"""
 import argparse
 import json
 import os
@@ -40,7 +17,6 @@ COND_LABEL = {
 
 
 def per_class_recall(cm):
-    # cm = [[TP_abn, FN_abn], [FP_abn, TN_norm]]  (baris=label, kolom=prediksi)
     abn_total = cm[0][0] + cm[0][1]
     norm_total = cm[1][0] + cm[1][1]
     rec_abn = cm[0][0] / abn_total if abn_total else 0.0
@@ -55,7 +31,7 @@ def mean_std(xs):
 
 
 def collect(results_dir: Path):
-    runs = defaultdict(list)  # exp -> [(seed, data), ...]
+    runs = defaultdict(list)
     for p in sorted(results_dir.glob('*_seed*.json')):
         with open(p) as f:
             data = json.load(f)
@@ -120,7 +96,6 @@ def to_markdown(agg):
          'Agregasi otomatis dari `results_multiseed/` oleh `aggregate_seeds.py`.',
          'Metrik utama = **F1 macro**. Recall per-kelas = rata-rata lintas seed.', '']
 
-    # Tabel ringkas lintas-eksperimen (kondisi no-norm = headline).
     L += ['## Ringkasan — kondisi No-Norm (headline)', '',
           '| Eksperimen | n_tta | Val F1 | No-Norm F1 (mean±std) | Acc (mean±std) | Rec Abn | Rec Norm | Gap |',
           '| ---------- | :---: | :----: | :-------------------: | :------------: | :-----: | :------: | :-: |']
@@ -139,7 +114,6 @@ def to_markdown(agg):
         )
     L.append('')
 
-    # Rincian per eksperimen, semua kondisi.
     for exp, d in agg.items():
         L += [f"## `{exp}`  ({d['n_runs']} run, seeds={d['seeds']}, n_tta={d['n_tta']})", '']
         if 'val_f1_mean' in d:

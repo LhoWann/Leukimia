@@ -1,17 +1,3 @@
-"""
-Uji signifikansi 3-seed antar-model pada F1 macro lintas-domain (C-NMC no-norm).
-
-Memasangkan F1 per-seed (42/123/2025) antar dua model lalu menjalankan paired
-t-test + Wilcoxon signed-rank + effect size (Cohen's d berpasangan). Membaca JSON
-per-seed yang sama dengan aggregate_seeds.py.
-
-CATATAN: n=3 seed → daya uji rendah. Wilcoxon n=3 tidak bisa mencapai p<0.25.
-Angka ini pelengkap (menunjukkan arah & besar efek), bukan bukti definitif.
-
-Jalankan dari root proyek:
-    python src/significance_test.py
-    python src/significance_test.py --condition cnmc_reinhard
-"""
 import argparse
 import json
 import os
@@ -29,14 +15,12 @@ except Exception:
 ROOT = Path(__file__).resolve().parent.parent
 os.chdir(ROOT)
 
-# (exp, folder) — folder tempat <exp>_seed<seed>.json berada.
 MODELS = [
     ('focusmix_stain', 'results_multiseed'),
     ('no_mix', 'results_multiseed'),
     ('focusmix', 'results_multiseed'),
     ('coatnet_0', 'results_coatnet'),
 ]
-# Pasangan yang diuji (a vs b).
 PAIRS = [
     ('focusmix_stain', 'coatnet_0'),
     ('no_mix', 'coatnet_0'),
@@ -52,7 +36,6 @@ LABEL = {
 
 
 def load_per_seed_f1(exp, folder, condition):
-    """Return {seed: f1_macro} untuk kondisi tertentu."""
     out = {}
     for p in sorted(Path(folder).glob(f'{exp}_seed*.json')):
         d = json.load(open(p))

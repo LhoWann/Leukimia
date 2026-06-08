@@ -87,12 +87,6 @@ class ConvNeXtV2Classifier(nn.Module):
 
 
 class CoAtNetClassifier(nn.Module):
-    """Baseline backbone: CoAtNet-0 (timm, pretrained ImageNet-1k).
-
-    Tanpa MHA injection — head sederhana (AdaptiveAvgPool sudah dilakukan timm
-    via global_pool='avg') + Dropout + Linear, menyamai head ConvNeXtV2Classifier
-    (head_dropout=0.3) agar perbandingan fair.
-    """
 
     def __init__(
         self,
@@ -113,7 +107,7 @@ class CoAtNetClassifier(nn.Module):
         self.classifier = nn.Linear(self.final_dim, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feat = self.backbone(x)                       # (B, num_features) pooled
+        feat = self.backbone(x)
         return self.classifier(self.head_dropout(feat))
 
 
@@ -133,19 +127,13 @@ def cutmix_mixup_batch(
     mixup_alpha: float = 0.2,
     mix_prob: float = 0.5,
 ):
-    """Batch-level CutMix atau Mixup (pilih acak per batch).
-
-    Mengembalikan (images, labels_a, labels_b, lam) yang kompatibel dengan
-    training_step (lam·loss_a + (1−lam)·loss_b). Dengan probabilitas (1−mix_prob)
-    batch dibiarkan apa adanya (lam=1, labels_b=labels_a).
-    """
     if np.random.rand() >= mix_prob:
         return images, labels, labels, 1.0
 
     perm = torch.randperm(images.size(0), device=images.device)
     labels_a, labels_b = labels, labels[perm]
 
-    if np.random.rand() < 0.5:  # CutMix
+    if np.random.rand() < 0.5:
         lam = float(np.random.beta(cutmix_alpha, cutmix_alpha))
         h, w = images.shape[2], images.shape[3]
         x1, y1, x2, y2 = _rand_bbox(h, w, lam)
@@ -153,7 +141,7 @@ def cutmix_mixup_batch(
         patch = images[perm, :, y1:y2, x1:x2].clone()
         images[:, :, y1:y2, x1:x2] = patch
         lam = 1.0 - ((x2 - x1) * (y2 - y1) / (h * w))
-    else:                        # Mixup
+    else:
         lam = float(np.random.beta(mixup_alpha, mixup_alpha))
         images = lam * images + (1.0 - lam) * images[perm]
 
@@ -301,8 +289,6 @@ class LeukemiaLightningModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         images, targets_a, targets_b, lam = batch
         if self.hparams.mixing == 'cutmix_mixup':
-            # Batch-level CutMix/Mixup. Dengan aug_mode='none' di datamodule,
-            # targets_a == targets_b == label asli, jadi aman dipakai sebagai sumber.
             images, targets_a, targets_b, lam = cutmix_mixup_batch(
                 images, targets_a,
                 cutmix_alpha=self.hparams.cutmix_alpha,
@@ -353,8 +339,6 @@ class LeukemiaLightningModel(L.LightningModule):
 
     def configure_optimizers(self):
         if self.hparams.backbone == 'coatnet':
-            # Baseline: uniform LR fine-tuning (LLRD adalah detail spesifik
-            # ConvNeXtV2, tidak termasuk protokol shared di PERBANDINGAN_BASELINE.md).
             optimizer = optim.AdamW(
                 self.model.parameters(),
                 lr=self.hparams.lr,

@@ -1,17 +1,3 @@
-"""
-Benchmark kompleksitas model: jumlah parameter, FLOPs, dan latensi inferensi.
-
-Membandingkan backbone proposal (ConvNeXtV2-Tiny, tanpa MHA) dengan baseline
-CoAtNet-0 pada input 224x224. FLOPs dihitung dengan torch FlopCounterMode;
-latensi diukur dengan warmup + rata-rata banyak iterasi (CUDA sync bila ada).
-
-Bobot pretrained tidak diperlukan (params/FLOPs/latensi tak bergantung nilai
-bobot) → pretrained=False agar cepat & tanpa unduhan.
-
-Jalankan dari root proyek:
-    python src/complexity_benchmark.py
-    python src/complexity_benchmark.py --iters 100 --device cuda
-"""
 import argparse
 import os
 import sys
@@ -47,7 +33,7 @@ def count_flops(model, device):
     fc = FlopCounterMode(display=False)
     with fc, torch.no_grad():
         model(x)
-    return fc.get_total_flops()  # MACs*2 = FLOPs (konvensi torch: total_flops = MACs)
+    return fc.get_total_flops()
 
 
 @torch.no_grad()
