@@ -1,0 +1,137 @@
+{
+  "checkpoint": "C:\\penelitian\\LEUKIMIA\\checkpoints_coatnet\\coatnet_0_seed2025\\epoch=01-val_f1=1.0000.ckpt",
+  "n_tta": 1,
+  "in_domain_val": {
+    "n_samples": 204,
+    "accuracy": 1.0,
+    "f1_macro": 1.0,
+    "f1_weighted": 1.0,
+    "precision_macro": 1.0,
+    "recall_macro": 1.0,
+    "confusion_matrix": [
+      [
+        111,
+        0
+      ],
+      [
+        0,
+        93
+      ]
+    ]
+  },
+  "cnmc_no_norm": {
+    "n_samples": 10661,
+    "accuracy": 0.68211237219773,
+    "f1_macro": 0.406077763885669,
+    "f1_weighted": 0.5535519499170026,
+    "precision_macro": 0.5910903631415971,
+    "recall_macro": 0.5001575585413366,
+    "confusion_matrix": [
+      [
+        7270,
+        2
+      ],
+      [
+        3387,
+        2
+      ]
+    ]
+  },
+  "cnmc_macenko": {
+    "n_samples": 10661,
+    "accuracy": 0.634555857799456,
+    "f1_macro": 0.4209604689144331,
+    "f1_weighted": 0.5490517268357527,
+    "precision_macro": 0.4265297888167408,
+    "recall_macro": 0.4765632582733045,
+    "confusion_matrix": [
+      [
+        6620,
+        652
+      ],
+      [
+        3244,
+        145
+      ]
+    ]
+  },
+  "cnmc_reinhard": {
+    "n_samples": 10661,
+    "accuracy": 0.6812681737172873,
+    "f1_macro": 0.4060604655573523,
+    "f1_weighted": 0.5533157405725139,
+    "precision_macro": 0.4409731354499342,
+    "recall_macro": 0.49961752593081676,
+    "confusion_matrix": [
+      [
+        7260,
+        12
+      ],
+      [
+        3386,
+        3
+      ]
+    ]
+  },
+  "optimal_threshold": 0.27999999999999997,
+  "cnmc_no_norm_calibrated": {
+    "n_samples": 10661,
+    "accuracy": 0.6338054591501735,
+    "f1_macro": 0.5966677008584101,
+    "f1_weighted": 0.6412444907956333,
+    "precision_macro": 0.595221032143494,
+    "recall_macro": 0.603320504667758,
+    "confusion_matrix": [
+      [
+        4996,
+        2276
+      ],
+      [
+        1628,
+        1761
+      ]
+    ],
+    "threshold": 0.27999999999999997
+  },
+  "cnmc_macenko_calibrated": {
+    "n_samples": 10661,
+    "accuracy": 0.3184504267892318,
+    "f1_macro": 0.2428376580394101,
+    "f1_weighted": 0.15568883611730933,
+    "precision_macro": 0.4839136359364722,
+    "recall_macro": 0.49986108635944737,
+    "confusion_matrix": [
+      [
+        13,
+        7259
+      ],
+      [
+        7,
+        3382
+      ]
+    ],
+    "threshold": 0.27999999999999997
+  },
+  "cnmc_reinhard_calibrated": {
+    "n_samples": 10661,
+    "accuracy": 0.3241722164900103,
+    "f1_macro": 0.25379723074637905,
+    "f1_weighted": 0.17033172383052067,
+    "precision_macro": 0.5551913356805382,
+    "recall_macro": 0.5027160081750282,
+    "confusion_matrix": [
+      [
+        91,
+        7181
+      ],
+      [
+        24,
+        3365
+      ]
+    ],
+    "threshold": 0.27999999999999997
+  },
+  "domain_shift_gap": 0.31788762780227,
+  "seed": 2025,
+  "exp": "coatnet_0"
+}

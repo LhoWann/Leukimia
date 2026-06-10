@@ -1,0 +1,17 @@
+{
+  "focusmix_stain": {
+    "42": "checkpoints_multiseed\\focusmix_stain_seed42\\epoch=07-val_f1=1.0000.ckpt",
+    "123": "checkpoints_multiseed\\focusmix_stain_seed123\\epoch=04-val_f1=1.0000.ckpt",
+    "2025": "checkpoints_multiseed\\focusmix_stain_seed2025\\epoch=06-val_f1=1.0000.ckpt"
+  },
+  "no_mix": {
+    "42": "checkpoints_multiseed\\no_mix_seed42\\epoch=02-val_f1=1.0000.ckpt",
+    "123": "checkpoints_multiseed\\no_mix_seed123\\epoch=03-val_f1=1.0000.ckpt",
+    "2025": "checkpoints_multiseed\\no_mix_seed2025\\epoch=03-val_f1=1.0000.ckpt"
+  },
+  "focusmix": {
+    "42": "checkpoints_multiseed\\focusmix_seed42\\epoch=07-val_f1=1.0000.ckpt",
+    "123": "checkpoints_multiseed\\focusmix_seed123\\epoch=02-val_f1=1.0000.ckpt",
+    "2025": "checkpoints_multiseed\\focusmix_seed2025\\epoch=05-val_f1=1.0000.ckpt"
+  }
+}
