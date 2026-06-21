@@ -311,7 +311,7 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
         max_epochs=cfg.max_epochs,
         accelerator='auto',
         devices='auto',
-        precision='bf16-mixed',
+        precision='16-mixed',
         strategy=DDPStrategy(find_unused_parameters=True),
         callbacks=callbacks,
         logger=CSVLogger(log_root, name=run_name),
