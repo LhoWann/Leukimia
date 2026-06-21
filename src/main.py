@@ -11,6 +11,7 @@ logging.getLogger("lightning.pytorch.utilities._pytree").setLevel(logging.ERROR)
 
 import argparse
 import random
+from lightning.pytorch.strategies import DDPStrategy
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -311,6 +312,7 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
         accelerator='auto',
         devices='auto',
         precision='bf16-mixed',
+        strategy=DDPStrategy(find_unused_parameters=True),
         callbacks=callbacks,
         logger=CSVLogger(log_root, name=run_name),
         gradient_clip_val=1.0,
