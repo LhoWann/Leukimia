@@ -246,13 +246,24 @@ def compute_metrics(
     return metrics, report
 
 
-def find_optimal_threshold(probs: np.ndarray, labels: np.ndarray) -> float:
-    best_f1, best_thr = 0.0, 0.5
+def find_optimal_threshold(probs, labels):
+    best_f1 = 0.0
+    best_thr = 0.5
+
     for thr in np.linspace(0.05, 0.95, 91):
-        preds = (probs[:, 1] >= thr).astype(int)
-        f1 = f1_score(labels, preds, average='macro', zero_division=0)
+        preds = (probs >= thr).astype(int)
+
+        f1 = f1_score(
+            labels,
+            preds,
+            average='macro',
+            zero_division=0
+        )
+
         if f1 > best_f1:
-            best_f1, best_thr = f1, float(thr)
+            best_f1 = f1
+            best_thr = float(thr)
+
     return best_thr
 
 
@@ -391,7 +402,39 @@ def evaluate_checkpoint(
         except Exception as exc:
             print(f"  Reinhard normalization failed: {exc}")
 
-    opt_thr = find_optimal_threshold(raw_probs, raw_labels)
+    #------
+        if not skip_val:
+
+        val_loader = build_loader(
+            val_dataset,
+            batch_size,
+            num_workers
+        )
+
+        if n_tta > 1:
+            _, _, val_probs = run_inference_tta(
+                model,
+                val_loader,
+                device,
+                n_tta=n_tta,
+                desc='Val calibration'
+            )
+        else:
+            _, _, val_probs = run_inference(
+                model,
+                val_loader,
+                device,
+                desc='Val calibration'
+            )
+
+        opt_thr = find_optimal_threshold(
+            val_probs,
+            val_labels
+        )
+
+    else:
+        opt_thr = 0.5
+    #------
     results['optimal_threshold'] = opt_thr
     for key, probs in _cond_probs.items():
         cal_preds = (probs[:, 1] >= opt_thr).astype(int)
@@ -551,7 +594,79 @@ def evaluate_ensemble(
             results['domain_shift_gap'] = float(gap)
 
     if 'no_norm' in _ens_avg_probs:
-        opt_thr = find_optimal_threshold(_ens_avg_probs['no_norm'], true_labels)
+        #==================================================================================
+        if not skip_val and val_accs:
+
+            # gunakan probabilitas validation set ensemble
+            val_prob_sum = None
+
+            for exp_name, ckpt_path in ckpts:
+
+                lm = LeukemiaLightningModel.load_from_checkpoint(
+                    str(ckpt_path),
+                    map_location=device
+                )
+
+                model = lm.model.eval().to(device)
+
+                val_transform = transforms.Compose([
+                    transforms.Resize(
+                        (image_size, image_size),
+                        antialias=True
+                    ),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        IMAGENET_MEAN,
+                        IMAGENET_STD
+                    ),
+                ])
+
+                val_ds = tv_datasets.ImageFolder(
+                    str(Path(data_dir) / 'val'),
+                    transform=val_transform
+                )
+
+                val_loader = build_loader(
+                    val_ds,
+                    batch_size,
+                    num_workers=0
+                )
+
+                if n_tta > 1:
+                    _, val_labels, probs = run_inference_tta(
+                        model,
+                        val_loader,
+                        device,
+                        n_tta=n_tta,
+                        desc='Val ensemble calibration'
+                    )
+                else:
+                    _, val_labels, probs = run_inference(
+                        model,
+                        val_loader,
+                        device,
+                        desc='Val ensemble calibration'
+                    )
+
+                val_prob_sum = (
+                    probs
+                    if val_prob_sum is None
+                    else val_prob_sum + probs
+                )
+
+            val_avg_probs = val_prob_sum / len(ckpts)
+
+            opt_thr = find_optimal_threshold(
+                val_avg_probs,
+                val_labels
+            )
+
+        else:
+            opt_thr = 0.5
+        
+        
+        
+        #==================================================================================
         results['optimal_threshold'] = opt_thr
         for key in _ens_avg_probs:
             cal_preds = (_ens_avg_probs[key][:, 1] >= opt_thr).astype(int)
