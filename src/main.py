@@ -22,12 +22,13 @@ try:
     import numpy.dtypes
     _safe = [numpy._core.multiarray.scalar, numpy.dtype]
     _safe += [getattr(numpy.dtypes, n) for n in dir(numpy.dtypes)
-              if isinstance(getattr(numpy.dtypes, n), type)]
+                if isinstance(getattr(numpy.dtypes, n), type)]
     torch.serialization.add_safe_globals(_safe)
 except Exception:
     pass
 
 import lightning as L
+from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.callbacks import (
     ModelCheckpoint, EarlyStopping, LearningRateMonitor,
 )
@@ -310,7 +311,8 @@ def run_experiment(cfg: ExperimentConfig, data_dir: str = 'dataset', seed: int =
         max_epochs=cfg.max_epochs,
         accelerator='auto',
         devices='auto',
-        precision='bf16-mixed',
+        strategy=DDPStrategy(find_unused_parameters=True),
+        precision='16-mixed',
         callbacks=callbacks,
         logger=CSVLogger(log_root, name=run_name),
         gradient_clip_val=1.0,
