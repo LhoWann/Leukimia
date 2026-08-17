@@ -39,6 +39,10 @@ from sklearn.metrics import (
     recall_score,
     confusion_matrix,
     classification_report,
+    roc_curve,
+    roc_auc_score,
+    precision_recall_curve,
+    average_precision_score,
 )
 
 import sys as _sys
@@ -255,6 +259,45 @@ def find_optimal_threshold(probs: np.ndarray, labels: np.ndarray) -> float:
             best_f1, best_thr = f1, float(thr)
     return best_thr
 
+def compute_roc_pr(probs: np.ndarray, labels: np.ndarray, positive_class: int = 0) -> Dict:
+    # positive_class=0 -> "Abnormal" (ALL): kelas yang false negative-nya paling mahal
+    y_score = probs[:, positive_class]
+    y_true = (labels == positive_class).astype(int)
+
+    fpr, tpr, roc_thr = roc_curve(y_true, y_score)
+    prec, rec, pr_thr = precision_recall_curve(y_true, y_score)
+
+    return {
+        'roc_auc': float(roc_auc_score(y_true, y_score)),
+        'pr_auc': float(average_precision_score(y_true, y_score)),
+        'roc_curve': {'fpr': fpr.tolist(), 'tpr': tpr.tolist(), 'thresholds': roc_thr.tolist()},
+        'pr_curve': {'precision': prec.tolist(), 'recall': rec.tolist(), 'thresholds': pr_thr.tolist()},
+    }
+
+
+def find_threshold_at_sensitivity(
+    probs: np.ndarray, labels: np.ndarray,
+    target_sensitivity: float = 0.95, positive_class: int = 0,
+) -> Dict:
+    """Cari ambang pada kelas Abnormal yang menjamin sensitivity >= target,
+    dengan precision setinggi mungkin pada ambang tsb."""
+    y_score = probs[:, positive_class]
+    y_true = (labels == positive_class).astype(int)
+    best_thr, best_precision = 0.5, 0.0
+    for thr in np.linspace(0.01, 0.99, 197):
+        preds = (y_score >= thr).astype(int)
+        tp = np.sum((preds == 1) & (y_true == 1))
+        fn = np.sum((preds == 0) & (y_true == 1))
+        fp = np.sum((preds == 1) & (y_true == 0))
+        sens = tp / (tp + fn) if (tp + fn) else 0.0
+        if sens >= target_sensitivity:
+            prec = tp / (tp + fp) if (tp + fp) else 0.0
+            if prec > best_precision:
+                best_precision, best_thr = prec, float(thr)
+    return {'target_sensitivity': target_sensitivity, 'threshold': best_thr,
+            'precision_at_threshold': best_precision}
+
+
 
 def _banner(title: str) -> str:
     bar = '─' * 60
@@ -304,6 +347,8 @@ def evaluate_checkpoint(
     no_macenko: bool,
     no_reinhard: bool,
     n_tta: int = 1,
+    save_probs: bool = False,
+    results_dir: str = 'results',
 ) -> Dict:
     tta_tag = f'  [TTA×{n_tta}]' if n_tta > 1 else ''
     print(f"\n{'═' * 60}")
@@ -354,6 +399,22 @@ def evaluate_checkpoint(
     raw_metrics, raw_report  = compute_metrics(raw_preds, raw_labels, class_names)
     print_result('C-NMC 2019  ·  No Stain Normalization', raw_metrics, raw_report)
     results['cnmc_no_norm'] = raw_metrics
+
+    roc_pr = compute_roc_pr(raw_probs, raw_labels, positive_class=0)
+    results['roc_pr'] = roc_pr
+    sens_op = find_threshold_at_sensitivity(raw_probs, raw_labels,
+                                            target_sensitivity=0.95, positive_class=0)
+    results['operating_point_sens95'] = sens_op
+    print(f"\n  ROC AUC (Abnormal) : {roc_pr['roc_auc']:.4f}   PR AUC (Abnormal) : {roc_pr['pr_auc']:.4f}")
+    print(f"  Sensitivity>=95% operating point : threshold={sens_op['threshold']:.2f}  "
+          f"precision={sens_op['precision_at_threshold']:.4f}")
+
+    if save_probs:
+        probs_dir = Path(results_dir)
+        probs_dir.mkdir(parents=True, exist_ok=True)
+        npz_path = probs_dir / f'{exp_name}_probs.npz'
+        np.savez(npz_path, probs=raw_probs, labels=raw_labels)
+        print(f"  Saved raw probs -> {npz_path}")
 
     _cond_probs: Dict[str, np.ndarray] = {'cnmc_no_norm': raw_probs}
 
@@ -442,6 +503,8 @@ def evaluate_ensemble(
     no_macenko: bool,
     no_reinhard: bool,
     n_tta: int = 1,
+    save_probs: bool = False,
+    results_dir: str = 'results',
 ) -> Dict:
     ckpts: List[Tuple[str, Path]] = []
     for name in exp_names:
@@ -557,6 +620,20 @@ def evaluate_ensemble(
             cal_preds = (_ens_avg_probs[key][:, 1] >= opt_thr).astype(int)
             cal_m, _  = compute_metrics(cal_preds, true_labels, class_names)
             results[f'cnmc_{key}_calibrated'] = {**cal_m, 'threshold': opt_thr}
+
+        roc_pr = compute_roc_pr(_ens_avg_probs['no_norm'], true_labels, positive_class=0)
+        results['roc_pr'] = roc_pr
+        sens_op = find_threshold_at_sensitivity(_ens_avg_probs['no_norm'], true_labels,
+                                                target_sensitivity=0.95, positive_class=0)
+        results['operating_point_sens95'] = sens_op
+
+        if save_probs:
+            probs_dir = Path(results_dir)
+            probs_dir.mkdir(parents=True, exist_ok=True)
+            ens_tag = '+'.join(exp_names)
+            npz_path = probs_dir / f'ensemble_{ens_tag}_probs.npz'
+            np.savez(npz_path, probs=_ens_avg_probs['no_norm'], labels=true_labels)
+            print(f"  Saved raw probs -> {npz_path}")
     else:
         opt_thr = 0.5
 
@@ -601,6 +678,9 @@ def main() -> None:
                         help='Test-Time Augmentation passes (1 = disabled, 8 = recommended)')
     parser.add_argument('--ensemble', nargs='+', default=None, metavar='EXP',
                         help='Evaluate ensemble of named experiments.')
+    parser.add_argument('--save-probs', action='store_true',
+                        help='Simpan probs+labels mentah (.npz) per eksperimen ke --results-dir, '
+                             'untuk bootstrap CI (src/bootstrap_ci.py).')
     args = parser.parse_args()
 
     if args.device == 'auto':
@@ -648,6 +728,8 @@ def main() -> None:
         no_macenko  = args.no_macenko,
         no_reinhard = args.no_reinhard,
         n_tta       = args.tta_n,
+        save_probs  = args.save_probs,
+        results_dir = args.results_dir,
     )
 
     if args.ensemble:

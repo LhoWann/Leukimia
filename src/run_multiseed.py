@@ -14,8 +14,9 @@ if str(SRC) not in sys.path:
 
 from main import EXPERIMENTS, run_experiment
 
-KEY_EXPERIMENTS = ['focusmix_stain', 'no_mix', 'focusmix']
-SEEDS = [42, 123, 2025]
+KEY_EXPERIMENTS = ['focusmix_stain', 'no_mix', 'focusmix', 'coatnet_0', 'coatnet_0_stain']
+
+SEEDS = [42, 123, 2025, 7, 314, 1001, 555, 8888]  # dari 3 -> 8 seed
 
 CKPT_ROOT = 'checkpoints_multiseed'
 LOG_ROOT = 'logs_multiseed'

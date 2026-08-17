@@ -20,18 +20,22 @@ MODELS = [
     ('no_mix', 'results_multiseed'),
     ('focusmix', 'results_multiseed'),
     ('coatnet_0', 'results_coatnet'),
+    ('coatnet_0_stain', 'results_coatnet'),
 ]
 PAIRS = [
     ('focusmix_stain', 'coatnet_0'),
     ('no_mix', 'coatnet_0'),
     ('focusmix_stain', 'no_mix'),
     ('focusmix_stain', 'focusmix'),
+    ('coatnet_0_stain', 'coatnet_0'),
+    ('focusmix_stain', 'coatnet_0_stain')
 ]
 LABEL = {
     'focusmix_stain': 'ConvNeXtV2+FocusAugMix+stain (Ours)',
     'no_mix': 'ConvNeXtV2 no_mix',
     'focusmix': 'ConvNeXtV2 focusmix',
     'coatnet_0': 'CoAtNet-0 baseline',
+    'coatnet_0_stain': 'CoAtNet-0+stain',
 }
 
 

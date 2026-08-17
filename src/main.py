@@ -184,6 +184,24 @@ EXPERIMENTS = {
         mix_prob=0.5,
         warmup_epochs=3,
     ),
+
+    'coatnet_0_stain': ExperimentConfig(
+        name='coatnet_0_stain',
+        aug_mode='none',
+        use_mha=False,
+        use_robust_aug=True,          # stain color-jitter (ReinhardJitter)
+        stain_sigma_mean=0.15,
+        stain_sigma_std=0.10,
+        stain_aug_prob=0.5,
+        backbone='coatnet',
+        coatnet_model_name='coatnet_0_rw_224.sw_in1k',
+        mixing='cutmix_mixup',
+        cutmix_alpha=1.0,
+        mixup_alpha=0.2,
+        mix_prob=0.5,
+        warmup_epochs=3,
+    ),
+
 }
 
 
